@@ -14,6 +14,7 @@ from pathlib import Path
 import httpx
 import uvicorn
 from fastapi import FastAPI, File, Form, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from faster_whisper import WhisperModel
@@ -70,6 +71,9 @@ except Exception as e:  # noqa: BLE001
     print(f"[!] Piper niedostępny ({e}) – telefon użyje własnego TTS.")
 
 app = FastAPI()
+# Apka Android ma interfejs wbudowany i łączy się z innego adresu – stąd CORS.
+# Serwer jest dostępny tylko w Twojej sieci Tailscale.
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 sessions: dict[str, list[dict]] = {}
 _model_cache: dict[str, str] = {}
 

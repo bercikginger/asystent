@@ -3,7 +3,7 @@ name: Build APK
 on:
   push:
     branches: [main, master]
-    paths: ["android/**", ".github/workflows/**"]
+    paths: ["android/**", "server/static/**", ".github/workflows/**"]
   workflow_dispatch:
 
 permissions:

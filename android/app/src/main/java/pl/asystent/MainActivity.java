@@ -2,57 +2,66 @@ package pl.asystent;
 
 import android.Manifest;
 import android.app.Activity;
-import android.app.AlertDialog;
-import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
-import android.text.InputType;
-import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
-import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.widget.EditText;
-import android.widget.FrameLayout;
+
+import androidx.webkit.WebViewAssetLoader;
 
 /**
- * Apka = okno na serwer asystenta na laptopie (adres z Tailscale, np. https://laptop.xxxx.ts.net).
- * Daje stronie dostęp do mikrofonu i autoodtwarzanie odpowiedzi.
+ * Interfejs jest wbudowany w apkę (assets) i serwowany z bezpiecznego adresu
+ * https://appassets.androidplatform.net, więc działa bez laptopa, a mikrofon ma dostęp.
+ * Z serwerem na laptopie łączy się po adresie ustawionym w ⚙.
  */
 public class MainActivity extends Activity {
 
     private static final int REQ_MIC = 1;
-    private static final String PREFS = "asystent";
-    private static final String KEY_URL = "url";
+    private static final String START_URL = "https://appassets.androidplatform.net/assets/index.html";
 
     private WebView web;
     private PermissionRequest pendingPermission;
-    private boolean dialogOpen = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        getWindow().setStatusBarColor(Color.parseColor("#0e1116"));
-        getWindow().setNavigationBarColor(Color.parseColor("#0e1116"));
+        getWindow().setStatusBarColor(Color.BLACK);
+        getWindow().setNavigationBarColor(Color.BLACK);
 
         web = new WebView(this);
-        web.setBackgroundColor(Color.parseColor("#0e1116"));
-        FrameLayout root = new FrameLayout(this);
-        root.addView(web);
-        setContentView(root);
+        web.setBackgroundColor(Color.BLACK);
+        setContentView(web);
 
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
         s.setMediaPlaybackRequiresUserGesture(false);
-        s.setCacheMode(WebSettings.LOAD_DEFAULT);
+        s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+        s.setUserAgentString(s.getUserAgentString() + " AsystentApp/1.1");
 
-        web.addJavascriptInterface(new Bridge(), "Asystent");
+        final WebViewAssetLoader loader = new WebViewAssetLoader.Builder()
+                .addPathHandler("/assets/", new WebViewAssetLoader.AssetsPathHandler(this))
+                .build();
+
+        web.setWebViewClient(new WebViewClient() {
+            @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                return loader.shouldInterceptRequest(request.getUrl());
+            }
+
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                Uri u = request.getUrl();
+                return !"appassets.androidplatform.net".equals(u.getHost());
+            }
+        });
 
         web.setWebChromeClient(new WebChromeClient() {
             @Override
@@ -68,106 +77,9 @@ public class MainActivity extends Activity {
             }
         });
 
-        web.setWebViewClient(new WebViewClient() {
-            @Override
-            public void onReceivedError(WebView view, WebResourceRequest req, WebResourceError err) {
-                if (req.isForMainFrame()) {
-                    showError(String.valueOf(err.getDescription()));
-                }
-            }
-        });
-
-        String url = getUrl();
-        if (url.isEmpty()) {
-            showUrlDialog(true);
-        } else if (savedInstanceState == null) {
-            web.loadUrl(url);
-        } else {
-            web.restoreState(savedInstanceState);
-        }
+        if (savedInstanceState != null) web.restoreState(savedInstanceState);
+        else web.loadUrl(START_URL);
     }
-
-    // --- adres serwera ---
-
-    private String getUrl() {
-        return getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_URL, "");
-    }
-
-    private void saveUrl(String url) {
-        SharedPreferences.Editor e = getSharedPreferences(PREFS, MODE_PRIVATE).edit();
-        e.putString(KEY_URL, url);
-        e.apply();
-    }
-
-    private static String normalize(String raw) {
-        String u = raw.trim();
-        if (u.isEmpty()) return u;
-        if (!u.startsWith("http://") && !u.startsWith("https://")) u = "https://" + u;
-        Uri parsed = Uri.parse(u);
-        if (parsed.getHost() == null) return "";
-        return u.endsWith("/") ? u : u + "/";
-    }
-
-    private void showUrlDialog(boolean firstRun) {
-        if (dialogOpen) return;
-        dialogOpen = true;
-        final EditText input = new EditText(this);
-        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        input.setHint("https://laptop.xxxx.ts.net");
-        input.setText(getUrl());
-        input.setSingleLine(true);
-        int pad = (int) (20 * getResources().getDisplayMetrics().density);
-        FrameLayout box = new FrameLayout(this);
-        box.setPadding(pad, pad / 2, pad, 0);
-        box.addView(input);
-
-        AlertDialog.Builder b = new AlertDialog.Builder(this)
-                .setTitle("Adres serwera")
-                .setMessage("Adres laptopa z Tailscale (tailscale serve).")
-                .setView(box)
-                .setCancelable(!firstRun)
-                .setPositiveButton("Połącz", (d, w) -> {
-                    dialogOpen = false;
-                    String u = normalize(input.getText().toString());
-                    if (u.isEmpty()) {
-                        showUrlDialog(true);
-                        return;
-                    }
-                    saveUrl(u);
-                    web.loadUrl(u);
-                });
-        if (!firstRun) b.setNegativeButton("Anuluj", (d, w) -> dialogOpen = false);
-        b.setOnCancelListener(d -> dialogOpen = false);
-        b.show();
-    }
-
-    private void showError(String reason) {
-        if (dialogOpen) return;
-        dialogOpen = true;
-        new AlertDialog.Builder(this)
-                .setTitle("Brak połączenia z laptopem")
-                .setMessage("Sprawdź, czy na laptopie działa start.bat i Tailscale.\n\n" + reason)
-                .setCancelable(false)
-                .setPositiveButton("Ponów", (d, w) -> {
-                    dialogOpen = false;
-                    web.loadUrl(getUrl());
-                })
-                .setNegativeButton("Zmień adres", (d, w) -> {
-                    dialogOpen = false;
-                    showUrlDialog(false);
-                })
-                .show();
-    }
-
-    /** Wywoływane ze strony: window.Asystent.settings() */
-    private class Bridge {
-        @JavascriptInterface
-        public void settings() {
-            runOnUiThread(() -> showUrlDialog(false));
-        }
-    }
-
-    // --- uprawnienia, cykl życia ---
 
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
