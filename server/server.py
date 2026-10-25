@@ -544,42 +544,205 @@ async def sentence_event(text: str, speak_on: str) -> dict:
 sessions: dict[str, list[dict]] = {}
 
 
-async def run_turn(session: str, text: str, board: str = "", speak_on: str = "phone"):
-    hist = sessions.setdefault(session, [])
-    hist.append({"role": "user", "content": text})
-    messages = [{"role": "system", "content": system_prompt()}] + hist[-MAX_TURNS * 2:]
-    ctx = Ctx(board)
-    split = Splitter()
+# --- Łącze do Claude (Anthropic API) ---
+ANTHROPIC_URL = "https://api.anthropic.com/v1"
+CONFIG_FILE = DATA / "config.json"
+CLAUDE_DEFAULT_MODEL = "claude-haiku-5-5"  # szybki do rozmowy głosowej; w ⚙ można wybrać mocniejszy
 
+
+def load_config() -> dict:
+    try:
+        return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def save_config(cfg: dict) -> None:
+    CONFIG_FILE.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
+
+
+def claude_key() -> str:
+    return os.getenv("ANTHROPIC_API_KEY") or load_config().get("anthropic_key", "")
+
+
+def claude_model() -> str:
+    return load_config().get("claude_model") or CLAUDE_DEFAULT_MODEL
+
+
+def claude_headers(key: str | None = None) -> dict:
+    return {"x-api-key": key or claude_key(), "anthropic-version": "2023-06-01", "content-type": "application/json"}
+
+
+class ClaudeError(Exception):
+    def __init__(self, status: int, text: str):
+        super().__init__(f"Claude {status}: {text[:200]}")
+        self.status, self.text = status, text
+
+
+_claude_search = {"ok": True}  # wyszukiwarka po stronie Anthropic (może być wyłączona w organizacji)
+
+
+def claude_tools(local_tools: list[dict]) -> list[dict]:
+    out = []
+    for t in local_tools:
+        f = t["function"]
+        if f["name"] == "web_search" and _claude_search["ok"]:
+            continue  # zamiast DuckDuckGo – wyszukiwarka Claude
+        out.append({"name": f["name"], "description": f["description"], "input_schema": f["parameters"]})
+    if _claude_search["ok"]:
+        out.append({"type": "web_search_20250305", "name": "web_search", "max_uses": 3,
+                    "user_location": {"type": "approximate", "country": "PL", "timezone": "Europe/Warsaw"}})
+    return out
+
+
+async def claude_stream(client: httpx.AsyncClient, body: dict):
+    """Strumień Messages API. Zwraca ("text", s), ("block", blok) i na końcu ("end", (bloki, stop_reason))."""
+    async with client.stream("POST", f"{ANTHROPIC_URL}/messages", headers=claude_headers(), json=body) as r:
+        if r.status_code >= 400:
+            raise ClaudeError(r.status_code, (await r.aread()).decode("utf-8", "replace"))
+        blocks: dict[int, dict] = {}
+        partial: dict[int, str] = {}
+        stop = None
+        async for ln in r.aiter_lines():
+            if not ln.startswith("data:"):
+                continue
+            try:
+                ev = json.loads(ln[5:])
+            except json.JSONDecodeError:
+                continue
+            t = ev.get("type")
+            if t == "content_block_start":
+                i = ev["index"]
+                blocks[i] = dict(ev["content_block"])
+                if blocks[i].get("type") in ("tool_use", "server_tool_use"):
+                    partial[i] = ""
+            elif t == "content_block_delta":
+                i, d = ev["index"], ev["delta"]
+                if d["type"] == "text_delta":
+                    blocks[i]["text"] = blocks[i].get("text", "") + d["text"]
+                    yield ("text", d["text"])
+                elif d["type"] == "input_json_delta":
+                    partial[i] = partial.get(i, "") + d.get("partial_json", "")
+                elif d["type"] == "citations_delta":
+                    blocks[i].setdefault("citations", []).append(d["citation"])
+            elif t == "content_block_stop":
+                i = ev["index"]
+                if i in partial:
+                    blocks[i]["input"] = parse_args(partial.pop(i) or "{}")
+                yield ("block", blocks[i])
+            elif t == "message_delta":
+                stop = ev.get("delta", {}).get("stop_reason") or stop
+            elif t == "error":
+                raise ClaudeError(500, json.dumps(ev.get("error", {})))
+        content = [b for k, b in sorted(blocks.items()) if not (b.get("type") == "text" and not b.get("text"))]
+        yield ("end", (content, stop))
+
+
+async def claude_turn(hist: list[dict], ctx: "Ctx", split: "Splitter", speak_on: str, client: httpx.AsyncClient):
+    msgs = [{"role": m["role"], "content": m["content"]} for m in hist[-MAX_TURNS * 2:] if m.get("content")]
+    while msgs and msgs[0]["role"] != "user":
+        msgs.pop(0)
+    system = system_prompt().replace("Jesteś osobistym asystentem głosowym.",
+                                     "Jesteś Claude, modelem firmy Anthropic, działającym jako osobisty asystent głosowy.")
+    local = await tools_for(client)
+    for _ in range(MAX_ROUNDS + 3):
+        body = {"model": claude_model(), "max_tokens": 4096, "system": system, "messages": msgs,
+                "tools": claude_tools(local), "stream": True}
+        try:
+            stream = claude_stream(client, body)
+            content, stop = [], None
+            async for kind, val in stream:
+                if kind == "text":
+                    for s in split.feed(val):
+                        yield await sentence_event(s, speak_on)
+                elif kind == "block" and val.get("type") == "server_tool_use":
+                    yield {"type": "search", "query": str(val.get("input", {}).get("query", ""))}
+                elif kind == "end":
+                    content, stop = val
+        except ClaudeError as e:
+            if e.status == 400 and "web_search" in e.text and _claude_search["ok"]:
+                _claude_search["ok"] = False  # wyszukiwarka Anthropic wyłączona – DuckDuckGo
+                continue
+            raise
+        msgs.append({"role": "assistant", "content": content})
+        if stop == "pause_turn":
+            continue
+        if stop != "tool_use":
+            return
+        results = []
+        for b in content:
+            if b.get("type") != "tool_use":
+                continue
+            yield {"type": "status", "text": TOOL_STATUS.get(b["name"], "pracuję…")}
+            res = await exec_tool(b["name"], b.get("input") or {}, ctx, client)
+            results.append({"type": "tool_result", "tool_use_id": b["id"], "content": res})
+            for ev in ctx.events:
+                yield ev
+            ctx.events.clear()
+        msgs.append({"role": "user", "content": results})
+
+
+async def local_turn(hist: list[dict], text: str, ctx: "Ctx", split: "Splitter", speak_on: str,
+                     client: httpx.AsyncClient):
+    messages = [{"role": "system", "content": system_prompt()}] + hist[-MAX_TURNS * 2:]
     if DDGS is not None and FORCE_SEARCH.search(text):
         yield {"type": "status", "text": "przeszukuję sieć…"}
         yield {"type": "search", "query": text}
         res = await run_in_threadpool(web_search, text)
         messages[-1] = {"role": "user", "content": f"{text}\n\n[Wyniki wyszukiwania w internecie]\n{res}"}
 
+    model = await pick_model(client)
+    tools = await tools_for(client)
+    for rnd in range(MAX_ROUNDS + 1):
+        use = tools if _tools_supported["ok"] and rnd < MAX_ROUNDS else None
+        calls = None
+        async for kind, val in stream_llm(client, model, messages, use):
+            if kind == "text":
+                for s in split.feed(val):
+                    yield await sentence_event(s, speak_on)
+            else:
+                calls = val
+        if not calls:
+            return
+        messages.append({"role": "assistant", "content": "", "tool_calls": calls})
+        for c in calls:
+            name = c["function"]["name"]
+            yield {"type": "status", "text": TOOL_STATUS.get(name, "pracuję…")}
+            res = await exec_tool(name, parse_args(c["function"]["arguments"]), ctx, client)
+            messages.append({"role": "tool", "tool_call_id": c["id"], "content": res})
+            for ev in ctx.events:
+                yield ev
+            ctx.events.clear()
+
+
+async def run_turn(session: str, text: str, board: str = "", speak_on: str = "phone", brain: str = "local"):
+    hist = sessions.setdefault(session, [])
+    hist.append({"role": "user", "content": text})
+    ctx, split = Ctx(board), Splitter()
+    used = "local"
+
     async with httpx.AsyncClient(timeout=httpx.Timeout(600, connect=10)) as client:
-        model = await pick_model(client)
-        tools = await tools_for(client)
-        for rnd in range(MAX_ROUNDS + 1):
-            use = tools if _tools_supported["ok"] and rnd < MAX_ROUNDS else None
-            calls = None
-            async for kind, val in stream_llm(client, model, messages, use):
-                if kind == "text":
-                    for s in split.feed(val):
-                        yield await sentence_event(s, speak_on)
-                else:
-                    calls = val
-            if not calls:
-                break
-            messages.append({"role": "assistant", "content": "", "tool_calls": calls})
-            for c in calls:
-                name = c["function"]["name"]
-                yield {"type": "status", "text": TOOL_STATUS.get(name, "pracuję…")}
-                res = await exec_tool(name, parse_args(c["function"]["arguments"]), ctx, client)
-                messages.append({"role": "tool", "tool_call_id": c["id"], "content": res})
-                for ev in ctx.events:
+        if brain == "claude" and claude_key():
+            spoke = False
+            try:
+                async for ev in claude_turn(hist, ctx, split, speak_on, client):
+                    spoke = spoke or ev["type"] == "sentence"
                     yield ev
-                ctx.events.clear()
+                used = "claude"
+            except (ClaudeError, httpx.HTTPError) as e:
+                if spoke:
+                    raise
+                print(f"[!] {e}")
+                why = "zły klucz" if isinstance(e, ClaudeError) and e.status in (401, 403) else \
+                      "limit lub brak środków" if isinstance(e, ClaudeError) and e.status in (402, 429) else "brak połączenia"
+                yield {"type": "brain", "brain": "local", "note": f"Claude niedostępny ({why}) — odpowiada model lokalny"}
+                ctx, split = Ctx(board), Splitter()
+        elif brain == "claude":
+            yield {"type": "brain", "brain": "local", "note": "brak klucza Claude — odpowiada model lokalny (⚙)"}
+
+        if used == "local":
+            async for ev in local_turn(hist, text, ctx, split, speak_on, client):
+                yield ev
 
     if ctx.arduino_last and not ctx.arduino_ok:
         yield ctx.arduino_last  # nieudana kompilacja albo brak płytki – karta z logiem
@@ -587,7 +750,7 @@ async def run_turn(session: str, text: str, board: str = "", speak_on: str = "ph
         yield await sentence_event(s, speak_on)
     reply = split.text()
     hist.append({"role": "assistant", "content": reply})
-    yield {"type": "done", "reply": reply}
+    yield {"type": "done", "reply": reply, "brain": used}
 
 
 def transcribe(path: str) -> str:
@@ -618,7 +781,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 @app.post("/api/stream")
 async def stream(text: str = Form(""), session: str = Form("default"), board: str = Form(""),
-                 speak_on: str = Form("phone"), audio: UploadFile | None = File(None)):
+                 speak_on: str = Form("phone"), brain: str = Form("local"), audio: UploadFile | None = File(None)):
     path = await save_upload(audio) if audio is not None else None
 
     async def gen():
@@ -632,7 +795,7 @@ async def stream(text: str = Form(""), session: str = Form("default"), board: st
                 yield line(await sentence_event("Nic nie usłyszałem, spróbuj jeszcze raz.", speak_on))
                 yield line({"type": "done", "reply": ""})
                 return
-            async for ev in run_turn(session, q, board, speak_on):
+            async for ev in run_turn(session, q, board, speak_on, brain):
                 yield line(ev)
         except Exception as e:  # noqa: BLE001
             print(f"[!] {e!r}")
@@ -793,13 +956,59 @@ async def ard_firmware(sid: str, fqbn: str):
             "parts": [{"offset": off, "data": base64.b64encode(d).decode()} for off, d in parts]}
 
 
+class ClaudeIn(BaseModel):
+    key: str = ""
+    model: str = ""
+
+
+@app.get("/api/claude")
+async def claude_get():
+    key = claude_key()
+    out = {"configured": bool(key), "model": claude_model(), "models": [], "env": bool(os.getenv("ANTHROPIC_API_KEY"))}
+    if key:
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.get(f"{ANTHROPIC_URL}/models?limit=50", headers=claude_headers())
+                if r.status_code == 200:
+                    out["models"] = [{"id": m["id"], "name": m.get("display_name", m["id"])} for m in r.json().get("data", [])]
+                else:
+                    out["error"] = f"HTTP {r.status_code}"
+        except Exception as e:  # noqa: BLE001
+            out["error"] = str(e)[:120]
+    return out
+
+
+@app.post("/api/claude")
+async def claude_set(body: ClaudeIn):
+    cfg = load_config()
+    key = body.key.strip()
+    if key:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(f"{ANTHROPIC_URL}/models?limit=1", headers=claude_headers(key))
+        if r.status_code != 200:
+            return JSONResponse({"ok": False, "error": "Klucz odrzucony (HTTP %d)." % r.status_code}, 400)
+        cfg["anthropic_key"] = key
+    if body.model and re.fullmatch(r"[\w.-]+", body.model):
+        cfg["claude_model"] = body.model
+    save_config(cfg)
+    return {"ok": True, "model": cfg.get("claude_model", CLAUDE_DEFAULT_MODEL)}
+
+
+@app.delete("/api/claude")
+async def claude_forget():
+    cfg = load_config()
+    cfg.pop("anthropic_key", None)
+    save_config(cfg)
+    return {"ok": True}
+
+
 @app.get("/api/health")
 async def health():
     return {"llm": LLM_URL, "whisper": WHISPER_MODEL, "piper": piper_voice is not None,
             "search": DDGS is not None, "model": _model_cache.get("id", LLM_MODEL),
             "arduino": bool(ARDUINO_CLI), "ha": bool(HA_URL and HA_TOKEN), "laptop_audio": sd is not None,
-            "memory": len(load_memory()), "stream": True, "version": "1.3",
-            "speaking": _playing["on"] or not _play_q.empty()}
+            "memory": len(load_memory()), "stream": True, "version": "1.4",
+            "speaking": _playing["on"] or not _play_q.empty(), "claude": bool(claude_key())}
 
 
 @app.get("/")

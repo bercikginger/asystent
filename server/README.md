@@ -1,4 +1,4 @@
-# Asystent głosowy – serwer na laptopie (v1.3)
+# Asystent głosowy – serwer na laptopie (v1.4)
 
 Telefon nagrywa głos → laptop rozpoznaje mowę (Whisper) → lokalny model odpowiada i używa narzędzi → laptop generuje głos (Piper) → telefon mówi **zdanie po zdaniu**.
 
@@ -44,11 +44,21 @@ Obsługiwane: Arduino Uno, Nano (też stary bootloader), ESP32, ESP8266, ESP32-S
 Jeśli ESP nie wchodzi w tryb wgrywania: przytrzymaj **BOOT** podczas startu wgrywania.
 Mega i Leonardo – tylko przez laptopa (**WGRAJ Z LAPTOPA**, płytka w USB laptopa).
 
-## 5. Słowo wybudzające (opcjonalnie)
+## 5. Claude jako mózg (opcjonalnie)
+1. Załóż klucz API na console.anthropic.com (płatne za zużycie).
+2. W apce: ⚙ → **CLAUDE · UPLINK** → wklej klucz → **POŁĄCZ**. Klucz zapisuje się tylko na laptopie (`data/config.json`).
+3. Przełączasz mózg, stukając **◈ LOKAL / ◈ CLAUDE** pod nazwą w nagłówku.
+
+Domyślny model to szybki Haiku (dobry do rozmowy głosowej); mocniejszy wybierzesz w ⚙.
+Claude ma własną wyszukiwarkę internetową (osobno płatną za wyszukanie) i te same narzędzia: pamięć, akcje telefonu, Arduino, dom.
+Gdy Claude jest niedostępny (brak sieci, limit, zły klucz), odpowiada model lokalny.
+Zamiast wklejania klucza możesz ustawić `set ANTHROPIC_API_KEY=sk-ant-...` przed startem.
+
+## 6. Słowo wybudzające (opcjonalnie)
 Kliknij **wake.bat**, powiedz **„hey Jarvis”** i pytanie – odpowiedź z głośnika laptopa.
 Polskiego „hej asystent” nie ma gotowego; trzeba by wytrenować własny model openWakeWord.
 
-## 6. Home Assistant (opcjonalnie)
+## 7. Home Assistant (opcjonalnie)
 Przed startem:
 ```
 set HA_URL=http://homeassistant.local:8123
@@ -71,6 +81,7 @@ Potem mówisz np. „zapal światło w salonie”.
 | `WHISPER_MODEL` | `small` | `base` = szybciej, `medium` = dokładniej |
 | `ARDUINO_CLI` | szuka w PATH i w tym folderze | ścieżka do arduino-cli |
 | `HA_URL`, `HA_TOKEN` | puste | Home Assistant |
+| `ANTHROPIC_API_KEY` | pusty | klucz Claude (zamiast wklejania w apce) |
 | `SYSTEM_PROMPT` | krótki asystent PL | charakter asystenta |
 
-Pamięć asystenta i programy Arduino są w folderze `data/`.
+Pamięć asystenta, programy Arduino i klucz Claude są w folderze `data/` – nie udostępniaj go.

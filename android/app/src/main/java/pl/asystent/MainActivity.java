@@ -49,7 +49,7 @@ public class MainActivity extends Activity {
     private static final int REQ_MIC = 1;
     private static final String START_URL = "https://appassets.androidplatform.net/assets/index.html";
     private static final String ACTION_USB_PERMISSION = "pl.asystent.USB_PERMISSION";
-    static final String VERSION = "1.3";
+    static final String VERSION = "1.4";
 
     private WebView web;
     private PermissionRequest pendingPermission;

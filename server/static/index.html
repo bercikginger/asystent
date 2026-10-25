@@ -44,7 +44,7 @@
   .glitch::after { color: #00a82b; animation: g2 6s infinite; }
   @keyframes g1 { 0%, 92%, 100% { opacity: 0; transform: none; } 93% { opacity: .9; transform: translate(-2px, 1px); clip-path: inset(0 0 55% 0); } 95% { opacity: .9; transform: translate(2px, -1px); clip-path: inset(40% 0 0 0); } }
   @keyframes g2 { 0%, 93%, 100% { opacity: 0; transform: none; } 94% { opacity: .8; transform: translate(2px, 0); clip-path: inset(60% 0 10% 0); } 96% { opacity: .8; transform: translate(-1px, 1px); clip-path: inset(10% 0 70% 0); } }
-  #net { display: block; font-size: 10px; letter-spacing: .14em; color: var(--dim); margin-top: 1px; }
+  #net { display: inline-block; font-size: 10px; letter-spacing: .14em; color: var(--dim); margin-top: 1px; }
   #net.ok { color: var(--green); text-shadow: 0 0 6px rgba(0,255,65,.6); }
   #net.err { color: var(--err); }
   .chip { background: transparent; border: 1px solid var(--dim); color: var(--green); font-size: 12px;
@@ -107,7 +107,7 @@
   .card input { width: 100%; margin-bottom: 10px; }
   .row { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
   .row .btn { padding: 9px 14px; }
-  #srvState, #info { font-size: 12px; min-height: 18px; margin-bottom: 10px; color: var(--dim); white-space: pre-wrap; }
+  #srvState, #info, #cState { font-size: 12px; min-height: 18px; margin-bottom: 10px; color: var(--dim); white-space: pre-wrap; }
   .toggles { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 16px; }
   hr { border: 0; border-top: 1px solid var(--faint); margin: 14px 0; }
 
@@ -139,6 +139,29 @@
   #memList { font-size: 12px; color: var(--text); margin: 0 0 10px; padding-left: 18px; max-height: 140px; overflow: auto; }
   .card select { width: 100%; margin-bottom: 10px; }
 
+  /* --- łącze Claude --- */
+  .sub { display: flex; align-items: center; gap: 10px; margin-top: 1px; }
+  #brain { background: none; border: 0; padding: 2px 0; color: var(--dim); font: 10px var(--mono); letter-spacing: .14em; cursor: pointer; }
+  #brain::after { content: " ▾"; opacity: .5; }
+  body.claude #brain { color: #eafff0; text-shadow: 0 0 8px rgba(214,255,224,.9); }
+  body.claude .glitch { color: #eafff0; text-shadow: 0 0 10px rgba(214,255,224,.8), 0 0 22px rgba(0,255,65,.5); }
+  body.claude #mic { border-color: #eafff0; color: #eafff0;
+    box-shadow: 0 0 22px rgba(214,255,224,.55), 0 0 30px rgba(0,255,65,.35), 0 0 18px rgba(214,255,224,.25) inset; }
+  body.claude #mic.rec { background: #eafff0; color: #000; }
+  .ai.cl { border-left-color: #eafff0; }
+  .ai.cl::before { color: #eafff0; }
+  #uplink { position: fixed; inset: 0; z-index: 25; display: none; align-items: center; justify-content: center;
+    background: rgba(0,0,0,.88); pointer-events: none; overflow: hidden; }
+  #uplink.on { display: flex; animation: upfade 1.6s forwards; }
+  #uplink pre { margin: 0; font: 13px/1.8 var(--mono); color: var(--green); text-shadow: var(--glow); }
+  #uplink pre b { color: #eafff0; font-weight: 700; }
+  #uplink::after { content: ""; position: absolute; left: 0; right: 0; height: 2px; top: 0;
+    background: linear-gradient(90deg, transparent, #eafff0, transparent); box-shadow: 0 0 18px #eafff0;
+    animation: sweep 1.1s ease-in-out; }
+  @keyframes sweep { from { top: 0; } to { top: 100%; } }
+  @keyframes upfade { 0%, 75% { opacity: 1; } 100% { opacity: 0; } }
+  .pw { position: relative; } .pw input { padding-right: 70px; }
+
   @media (prefers-reduced-motion: reduce) { #rain, #crt { display: none; } .glitch::before, .glitch::after { display: none; } }
 </style>
 </head>
@@ -146,11 +169,12 @@
 <canvas id="rain"></canvas>
 <div id="crt"></div>
 <div id="boot"></div>
+<div id="uplink"><pre id="uplinkText"></pre></div>
 
 <header class="layer">
   <div class="brand">
     <h1 class="glitch" data-text="ASYSTENT">ASYSTENT</h1>
-    <span id="net">● ŁĄCZĘ</span>
+    <div class="sub"><span id="net">● ŁĄCZĘ</span><button id="brain" title="Mózg asystenta: lokalny model albo Claude">◈ LOKAL</button></div>
   </div>
   <button id="convo" class="chip" title="Po odpowiedzi automatycznie słucha dalej">∞ ROZMOWA</button>
   <button id="gear" class="chip" aria-label="Ustawienia">⚙</button>
@@ -187,6 +211,16 @@
     <div class="row">
       <button id="srvTest" class="btn">TESTUJ</button>
       <button id="srvSave" class="btn solid">ZAPISZ</button>
+    </div>
+    <hr>
+    <h2 id="claudeSec">// CLAUDE · UPLINK</h2>
+    <p>Mocniejszy mózg przez API Anthropic (płatne za zużycie, klucz z console.anthropic.com). Klucz zostaje na laptopie. Przełączasz napisem ◈ w nagłówku.</p>
+    <div class="pw"><input id="ckey" type="password" placeholder="sk-ant-…" autocomplete="off"></div>
+    <select id="cmodel"></select>
+    <div id="cState"></div>
+    <div class="row">
+      <button id="cForget" class="btn">ZAPOMNIJ KLUCZ</button>
+      <button id="cSave" class="btn solid">POŁĄCZ</button>
     </div>
     <hr>
     <h2>// EFEKTY</h2>
@@ -236,6 +270,8 @@ for (const k in fx) fx[k] = store.get("fx_" + k, "1") === "1";
 const opt = { laptopVoice: false, btMic: false, headset: true };
 for (const k in opt) opt[k] = store.get("opt_" + k, opt[k] ? "1" : "0") === "1";
 let board = store.get("board", "");
+let brain = store.get("brain", "local");      // "local" albo "claude"
+let claudeReady = false, claudeModel = "";
 const BOARDS_DEFAULT = [
   { name: "ESP32 Dev Module", fqbn: "esp32:esp32:esp32" }, { name: "ESP32-S3", fqbn: "esp32:esp32:esp32s3" },
   { name: "ESP32-C3", fqbn: "esp32:esp32:esp32c3" }, { name: "ESP8266 NodeMCU", fqbn: "esp8266:esp8266:nodemcuv2" },
@@ -288,6 +324,7 @@ function ctx() {
 }
 const hhmm = (t) => new Date(t).toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
 const LABEL = { me: "> TY", ai: "> ASYSTENT", ard: "> ARDUINO" };
+const ACCENT = () => (brain === "claude" ? "214,255,224" : "0,255,65");
 
 function add(cls, text, opts = {}) {
   const t = opts.t || Date.now();
@@ -422,11 +459,13 @@ function handleEvent(ev, t) {
     case "memory": add("net", "◆ " + ev.text); break;
     case "phone": runPhone(ev); break;
     case "arduino": arduinoCard(ev); break;
+    case "brain": t.brain = ev.brain; add("net", "◈ " + ev.note); break;
     case "sentence":
       if (t.cancelled) return;
       if (!t.el) {
         stopThinking(); busy = false; setMic("");
         t.el = add("ai", "", { restore: true });
+        if (t.brain === "claude") { t.el.classList.add("cl"); t.el.dataset.h = "> CLAUDE · " + hhmm(Date.now()); }
         buzz(25); blip(1320, 0.05);
         setStatus(ev.laptop ? "mówię z laptopa…" : "transmisja…  (stuknij, żeby przerwać)");
       }
@@ -447,7 +486,9 @@ async function runTurn(fd) {
   fd.append("session", session);
   fd.append("board", board);
   fd.append("speak_on", opt.laptopVoice ? "laptop" : "phone");
+  fd.append("brain", brain);
   const t = turn = newTurn();
+  t.brain = brain;
   abortCtl = new AbortController();
   try {
     const r = await fetch(apiUrl("api/stream"), { method: "POST", body: fd, signal: abortCtl.signal });
@@ -692,12 +733,77 @@ window.onFlash = (o) => {
   flashCard = null;
 };
 
+// ===== łącze Claude =====
+function applyBrain() {
+  document.body.classList.toggle("claude", brain === "claude");
+  $("brain").textContent = brain === "claude" ? "◈ CLAUDE" : "◈ LOKAL";
+}
+function uplinkAnim(on) {
+  const box = $("uplink"), pre = $("uplinkText");
+  const lines = on
+    ? [["◈ UPLINK // ANTHROPIC", 1], ["> uzgadnianie............ [OK]"], ["> szyfrowanie............ [TLS]"],
+       ["> model: " + (claudeModel || "claude")], ["ŁĄCZE AKTYWNE", 1]]
+    : [["◈ UPLINK ZAMKNIĘTY", 1], ["> przełączam na rdzeń lokalny"], ["RDZEŃ LOKALNY AKTYWNY", 1]];
+  pre.textContent = "";
+  box.classList.remove("on"); void box.offsetWidth; box.classList.add("on");
+  lines.forEach(([txt, bold], i) => setTimeout(() => {
+    const el = document.createElement(bold ? "b" : "span");
+    el.textContent = txt + "\n"; pre.appendChild(el);
+    blip(on ? 600 + i * 220 : 900 - i * 200, 0.05);
+  }, 90 + i * 150));
+  buzz(on ? [20, 40, 20, 40, 60] : 40);
+  setTimeout(() => box.classList.remove("on"), 1700);
+}
+$("brain").addEventListener("click", () => {
+  if (brain === "local" && !claudeReady) {
+    openSettings();
+    setTimeout(() => $("claudeSec").scrollIntoView({ behavior: "smooth" }), 50);
+    $("cState").textContent = "wklej klucz API, żeby nawiązać łącze";
+    return;
+  }
+  brain = brain === "claude" ? "local" : "claude";
+  store.set("brain", brain); applyBrain(); uplinkAnim(brain === "claude");
+});
+async function loadClaude() {
+  const sel = $("cmodel");
+  try {
+    const r = await fetch(apiUrl("api/claude")).then((x) => x.json());
+    claudeReady = r.configured; claudeModel = r.model;
+    const models = r.models.length ? r.models : [{ id: r.model, name: r.model }];
+    sel.innerHTML = "";
+    models.forEach((m) => { const o = document.createElement("option"); o.value = m.id; o.textContent = m.name; sel.appendChild(o); });
+    sel.value = r.model;
+    $("cState").textContent = r.configured ? "● łącze gotowe" + (r.error ? " (uwaga: " + r.error + ")" : "") + (r.env ? " · klucz z ANTHROPIC_API_KEY" : "") : "brak klucza";
+    $("ckey").placeholder = r.configured ? "•••••• zapisany na laptopie" : "sk-ant-…";
+  } catch { $("cState").textContent = "brak połączenia z laptopem"; }
+}
+$("cSave").addEventListener("click", async () => {
+  $("cState").textContent = "sprawdzam klucz…";
+  try {
+    const r = await fetch(apiUrl("api/claude"), { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: $("ckey").value.trim(), model: $("cmodel").value }) }).then((x) => x.json());
+    if (!r.ok) { $("cState").textContent = "✗ " + (r.error || "nie udało się"); blip(160, 0.2, "sawtooth"); return; }
+    $("ckey").value = "";
+    await loadClaude();
+    if (claudeReady && brain !== "claude") { brain = "claude"; store.set("brain", brain); applyBrain(); closeSettings(); uplinkAnim(true); }
+  } catch (e) { $("cState").textContent = "✗ " + e.message; }
+});
+$("cmodel").addEventListener("change", async () => {
+  try { await fetch(apiUrl("api/claude"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: $("cmodel").value }) }); claudeModel = $("cmodel").value; } catch {}
+});
+$("cForget").addEventListener("click", async () => {
+  try { await fetch(apiUrl("api/claude"), { method: "DELETE" }); } catch {}
+  await loadClaude();
+  if (brain === "claude" && !claudeReady) { brain = "local"; store.set("brain", brain); applyBrain(); }
+});
+applyBrain();
+
 // ===== ustawienia =====
 function openSettings() {
   $("srv").value = server || (IN_APP ? "" : location.origin + "/");
   $("srvState").textContent = IN_APP ? "" : "Strona otwarta z laptopa – adres ustawia się sam.";
   boardOptions($("boardSel"), board);
-  loadMemory();
+  loadMemory(); loadClaude();
   $("settings").classList.add("open");
 }
 function closeSettings() { $("settings").classList.remove("open"); }
@@ -710,7 +816,7 @@ function showInfo(h) {
   const yn = (v) => (v ? "TAK" : "NIE");
   $("info").textContent = h
     ? `serwer: v${h.version || "?"}  model: ${h.model || "(pierwszy załadowany)"}\nmowa: whisper ${h.whisper}  głos: ${h.piper ? "Piper" : "telefonu"}\n` +
-      `internet: ${yn(h.search)}  arduino-cli: ${yn(h.arduino)}  dom: ${yn(h.ha)}\ngłośnik laptopa: ${yn(h.laptop_audio)}  pamięć: ${h.memory ?? 0} faktów`
+      `internet: ${yn(h.search)}  arduino-cli: ${yn(h.arduino)}  dom: ${yn(h.ha)}  claude: ${yn(h.claude)}\ngłośnik laptopa: ${yn(h.laptop_audio)}  pamięć: ${h.memory ?? 0} faktów`
     : "serwer niedostępny";
 }
 async function loadMemory() {
@@ -769,6 +875,8 @@ async function checkHealth() {
   try {
     const h = await testServer(server);
     setNet(true); showInfo(h);
+    claudeReady = !!h.claude;
+    if (claudeReady && !claudeModel) fetch(apiUrl("api/claude")).then((x) => x.json()).then((r) => { claudeModel = r.model; }).catch(() => {});
     if (h.arduino) fetch(apiUrl("api/arduino/ports")).then((x) => x.json()).then((r) => { if (r.boards?.length) boards = r.boards; }).catch(() => {});
     return h;
   } catch { setNet(false); showInfo(null); return false; }
@@ -810,11 +918,11 @@ async function checkHealth() {
       const len = 4 + level(i, t) * 26;
       const x1 = cx + Math.cos(a) * r0, y1 = cy + Math.sin(a) * r0;
       const x2 = cx + Math.cos(a) * (r0 + len), y2 = cy + Math.sin(a) * (r0 + len);
-      g.strokeStyle = `rgba(0,255,65,${0.35 + Math.min(0.65, len / 30)})`;
+      g.strokeStyle = `rgba(${ACCENT()},${0.35 + Math.min(0.65, len / 30)})`;
       g.lineWidth = 2.4;
       g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke();
     }
-    g.strokeStyle = "rgba(0,255,65,.25)"; g.lineWidth = 1;
+    g.strokeStyle = `rgba(${ACCENT()},.25)`; g.lineWidth = 1;
     g.setLineDash([3, 7]); g.lineDashOffset = -t / (busy || flashCard ? 15 : 60);
     g.beginPath(); g.arc(cx, cy, r0 + 33, 0, Math.PI * 2); g.stroke(); g.setLineDash([]);
   }
@@ -845,7 +953,7 @@ async function checkHealth() {
     for (let i = 0; i < cols; i++) {
       const ch = chars[(Math.random() * chars.length) | 0];
       const y = drops[i] * size;
-      g.fillStyle = Math.random() > 0.96 ? "#d6ffe0" : "#00ff41";
+      g.fillStyle = Math.random() > (brain === "claude" ? 0.86 : 0.96) ? "#eafff0" : "#00ff41";
       g.fillText(ch, i * size, y);
       if (y > innerHeight && Math.random() > 0.975) drops[i] = 0;
       drops[i]++;
@@ -874,7 +982,7 @@ applyNative();
   };
   let usb = false;
   try { usb = NATIVE && JSON.parse(NATIVE.info()).usbHost; } catch {}
-  await line("ASYSTENT OS v1.3 // build " + new Date().getFullYear());
+  await line("ASYSTENT OS v1.4 // build " + new Date().getFullYear());
   await wait(150);
   await line("> inicjalizacja rdzenia......", ["ok", "[OK]"]);
   await line("> moduł nasłuchu..............", ["ok", window.isSecureContext ? "[OK]" : "[BRAK HTTPS]"]);
@@ -887,6 +995,7 @@ applyNative();
   if (h) {
     await line("> dostęp do sieci.............", h.search ? ["ok", "[OK]"] : ["bad", "[BRAK]"]);
     await line("> kompilator arduino..........", h.arduino ? ["ok", "[OK]"] : ["bad", "[BRAK]"]);
+    await line("> uplink claude...............", h.claude ? ["ok", brain === "claude" ? "[AKTYWNY]" : "[GOTOWY]"] : ["bad", "[BRAK KLUCZA]"]);
   }
   await wait(250);
   await line(h ? "> system gotowy." : "> tryb offline — ustaw serwer w ⚙");
@@ -897,7 +1006,7 @@ applyNative();
 
 function afterBoot(h) {
   booted = true;
-  if (!history.length) add("sys", "asystent v1.3 // system gotowy");
+  if (!history.length) add("sys", "asystent v1.4 // system gotowy");
   if (IN_APP && !server) add("sys", "brak serwera — ustaw adres w ⚙");
   else if (!h) add("sys", "serwer offline — sprawdzę ponownie co 15 s");
   if (wantListen) { wantListen = false; startRec(); }
