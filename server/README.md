@@ -82,6 +82,7 @@ Potem mówisz np. „zapal światło w salonie”.
 | `ARDUINO_CLI` | szuka w PATH i w tym folderze | ścieżka do arduino-cli |
 | `HA_URL`, `HA_TOKEN` | puste | Home Assistant |
 | `ANTHROPIC_API_KEY` | pusty | klucz Claude (zamiast wklejania w apce) |
+| `ANTHROPIC_WORKSPACE_ID` | pusty | tylko dla klucza bez przypisanego workspace |
 | `SYSTEM_PROMPT` | krótki asystent PL | charakter asystenta |
 
 Pamięć asystenta, programy Arduino i klucz Claude są w folderze `data/` – nie udostępniaj go.

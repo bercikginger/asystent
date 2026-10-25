@@ -570,7 +570,12 @@ def claude_model() -> str:
 
 
 def claude_headers(key: str | None = None) -> dict:
-    return {"x-api-key": key or claude_key(), "anthropic-version": "2023-06-01", "content-type": "application/json"}
+    h = {"Authorization": f"Bearer {key or claude_key()}", "anthropic-version": "2023-06-01",
+         "content-type": "application/json"}
+    ws = os.getenv("ANTHROPIC_WORKSPACE_ID") or load_config().get("workspace_id", "")
+    if ws:
+        h["anthropic-workspace-id"] = ws  # tylko dla kluczy bez przypisanego workspace
+    return h
 
 
 class ClaudeError(Exception):
@@ -986,7 +991,10 @@ async def claude_set(body: ClaudeIn):
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.get(f"{ANTHROPIC_URL}/models?limit=1", headers=claude_headers(key))
         if r.status_code != 200:
-            return JSONResponse({"ok": False, "error": "Klucz odrzucony (HTTP %d)." % r.status_code}, 400)
+            msg = "Klucz odrzucony (HTTP %d)." % r.status_code
+            if "workspace" in r.text:
+                msg = "Klucz nie jest przypisany do workspace – utwórz nowy klucz z wybranym workspace (np. Default)."
+            return JSONResponse({"ok": False, "error": msg}, 400)
         cfg["anthropic_key"] = key
     if body.model and re.fullmatch(r"[\w.-]+", body.model):
         cfg["claude_model"] = body.model
