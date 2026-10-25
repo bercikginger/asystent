@@ -1,0 +1,5 @@
+openwakeword
+onnxruntime
+sounddevice
+numpy
+httpx

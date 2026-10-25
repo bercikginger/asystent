@@ -5,3 +5,5 @@ httpx
 faster-whisper
 piper-tts
 ddgs
+numpy
+sounddevice

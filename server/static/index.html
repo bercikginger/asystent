@@ -118,6 +118,27 @@
   #boot .ok { color: #d6ffe0; }
   #boot .bad { color: var(--err); text-shadow: none; }
 
+
+  /* --- karta Arduino --- */
+  .ard { align-self: stretch; max-width: 100%; border: 1px solid var(--green); color: var(--text); white-space: normal; }
+  .ard::before { color: var(--green); }
+  .ard-sum { color: var(--green); margin-bottom: 6px; }
+  .ard details { margin: 6px 0; }
+  .ard summary { cursor: pointer; color: var(--green2); font-size: 12px; letter-spacing: .06em; }
+  .code { margin: 6px 0 0; max-height: 240px; overflow: auto; padding: 8px; background: #000; border: 1px solid var(--faint);
+    color: #9dffb8; font: 12px/1.45 var(--mono); white-space: pre; }
+  .ard-row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  .ard-row .btn { padding: 9px 12px; flex: 1; min-width: 140px; }
+  .ard-row .btn:disabled { opacity: .4; }
+  select { background: #000; color: var(--green); border: 1px solid var(--dim); border-radius: 4px; padding: 9px 8px;
+    font: 13px var(--mono); flex: 1; min-width: 0; max-width: 100%; }
+  .bar { height: 6px; margin-top: 10px; background: var(--faint); border-radius: 3px; overflow: hidden; display: none; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--green); box-shadow: 0 0 10px var(--green); transition: width .2s; }
+  .ard-log { margin: 8px 0 0; font: 11px/1.4 var(--mono); color: var(--dim); white-space: pre-wrap; max-height: 160px; overflow: auto; }
+  .ard-log.ok { color: var(--green); } .ard-log.bad { color: #ff8080; }
+  #memList { font-size: 12px; color: var(--text); margin: 0 0 10px; padding-left: 18px; max-height: 140px; overflow: auto; }
+  .card select { width: 100%; margin-bottom: 10px; }
+
   @media (prefers-reduced-motion: reduce) { #rain, #crt { display: none; } .glitch::before, .glitch::after { display: none; } }
 </style>
 </head>
@@ -148,6 +169,8 @@
   <button class="chip q">⚡ CO NOWEGO</button>
   <button class="chip q">⏱ GODZINA</button>
   <button class="chip q">☺ ŻART</button>
+  <button class="chip q">⏲ MINUTNIK 5 MIN</button>
+  <button class="chip q">⚙ MIGAJ DIODĄ</button>
   <button class="chip q">⌘ CO POTRAFISZ</button>
 </div>
 <form id="form" class="layer">
@@ -174,6 +197,19 @@
       <button class="chip tg" data-k="haptic">WIBRACJE</button>
       <button class="chip tg" data-k="boot">EKRAN STARTU</button>
     </div>
+    <h2>// GŁOS I SŁUCHAWKI</h2>
+    <div class="toggles">
+      <button class="chip op" data-k="laptopVoice" title="Odpowiedzi z głośnika laptopa">GŁOS Z LAPTOPA</button>
+      <button class="chip op app-only" data-k="btMic" title="Mikrofon słuchawek / zestawu w aucie">MIKROFON BT</button>
+      <button class="chip op app-only" data-k="headset" title="Przycisk na słuchawkach = mów">PRZYCISK SŁUCHAWEK</button>
+    </div>
+    <div id="btState" class="sys" style="font-size:12px;color:var(--dim);margin:-8px 0 12px"></div>
+    <h2>// ARDUINO / ESP</h2>
+    <p>Płytka do programów. Wgrywasz kablem OTG z telefonu albo przez laptopa.</p>
+    <select id="boardSel"></select>
+    <h2>// PAMIĘĆ</h2>
+    <ul id="memList"></ul>
+    <div class="row" style="margin-bottom:14px"><button id="memClear" class="btn">ZAPOMNIJ WSZYSTKO</button></div>
     <h2>// SYSTEM</h2>
     <div id="info">—</div>
     <div class="row">
@@ -186,6 +222,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const log = $("log"), statusEl = $("status"), mic = $("mic");
+const NATIVE = window.AsystentNative || null;
 
 // ===== ustawienia lokalne (storage potrafi rzucić wyjątek) =====
 const store = {
@@ -196,10 +233,25 @@ const IN_APP = location.hostname === "appassets.androidplatform.net" || navigato
 let server = store.get("server", "");
 const fx = { rain: true, crt: true, sfx: true, haptic: true, boot: true };
 for (const k in fx) fx[k] = store.get("fx_" + k, "1") === "1";
+const opt = { laptopVoice: false, btMic: false, headset: true };
+for (const k in opt) opt[k] = store.get("opt_" + k, opt[k] ? "1" : "0") === "1";
+let board = store.get("board", "");
+const BOARDS_DEFAULT = [
+  { name: "ESP32 Dev Module", fqbn: "esp32:esp32:esp32" }, { name: "ESP32-S3", fqbn: "esp32:esp32:esp32s3" },
+  { name: "ESP32-C3", fqbn: "esp32:esp32:esp32c3" }, { name: "ESP8266 NodeMCU", fqbn: "esp8266:esp8266:nodemcuv2" },
+  { name: "Arduino Uno", fqbn: "arduino:avr:uno" }, { name: "Arduino Nano", fqbn: "arduino:avr:nano" },
+  { name: "Arduino Nano (stary bootloader)", fqbn: "arduino:avr:nano:cpu=atmega328old" },
+  { name: "Arduino Mega 2560", fqbn: "arduino:avr:mega" }, { name: "Arduino Leonardo", fqbn: "arduino:avr:leonardo" },
+];
+const OTG_OK = /^(arduino:avr:(uno|nano)|esp32:esp32:|esp8266:esp8266:)/;
+let boards = BOARDS_DEFAULT;
+
 function applyFx() {
   document.body.classList.toggle("no-rain", !fx.rain);
   document.body.classList.toggle("no-crt", !fx.crt);
   document.querySelectorAll(".tg").forEach((b) => b.classList.toggle("on", fx[b.dataset.k]));
+  document.querySelectorAll(".op").forEach((b) => b.classList.toggle("on", opt[b.dataset.k]));
+  document.querySelectorAll(".app-only").forEach((b) => { b.disabled = !NATIVE; if (!NATIVE) b.title = "tylko w apce"; });
 }
 applyFx();
 
@@ -222,8 +274,9 @@ let convoMode = store.get("convo", "0") === "1";
 $("convo").classList.toggle("on", convoMode);
 
 // ===== stan =====
-let stream = null, recorder = null, chunks = [], recording = false, busy = false, speaking = false;
-let audioCtx = null, micAnalyser = null, micSrc = null, playAnalyser = null, vadTimer = null;
+let stream = null, recorder = null, chunks = [], recording = false, busy = false, speaking = false, booted = false;
+let audioCtx = null, micAnalyser = null, playAnalyser = null, vadTimer = null;
+let turn = null, abortCtl = null, flashCard = null;
 const player = new Audio();
 let history = [];
 try { history = JSON.parse(store.get("history", "[]")) || []; } catch { history = []; }
@@ -234,7 +287,7 @@ function ctx() {
   return audioCtx;
 }
 const hhmm = (t) => new Date(t).toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
-const LABEL = { me: "> TY", ai: "> ASYSTENT" };
+const LABEL = { me: "> TY", ai: "> ASYSTENT", ard: "> ARDUINO" };
 
 function add(cls, text, opts = {}) {
   const t = opts.t || Date.now();
@@ -242,16 +295,12 @@ function add(cls, text, opts = {}) {
   d.className = "msg " + cls; d.textContent = text;
   if (LABEL[cls]) d.dataset.h = LABEL[cls] + " · " + hhmm(t);
   log.appendChild(d); log.scrollTop = log.scrollHeight;
-  if (!opts.restore && cls !== "sys") {
-    history.push({ cls, text, t });
-    history = history.slice(-60);
-    store.set("history", JSON.stringify(history));
-  }
+  if (!opts.restore && cls !== "sys") pushHistory(cls, text, t);
   return d;
 }
-function saveLast(text) {
-  if (!history.length) return;
-  history[history.length - 1].text = text;
+function pushHistory(cls, text, t = Date.now()) {
+  history.push({ cls, text, t });
+  history = history.slice(-60);
   store.set("history", JSON.stringify(history));
 }
 function setMic(state) { mic.className = state || ""; }
@@ -296,30 +345,13 @@ function blip(freq = 880, dur = 0.06, type = "square", vol = 0.04) {
 }
 function buzz(ms) { if (fx.haptic && navigator.vibrate) try { navigator.vibrate(ms); } catch {} }
 
-// odpowiedź pisana jak w terminalu
-function typeOut(el, text) {
-  return new Promise((resolve) => {
-    el.textContent = ""; el.classList.add("cursor");
-    let i = 0; const step = Math.max(1, Math.round(text.length / 140));
-    const t = setInterval(() => {
-      i += step; el.textContent = text.slice(0, i); log.scrollTop = log.scrollHeight;
-      if (i >= text.length) { clearInterval(t); el.classList.remove("cursor"); resolve(); }
-    }, 16);
-  });
-}
-
 if (!window.isSecureContext) {
   const w = $("warn");
   w.style.display = "block";
   w.textContent = "Mikrofon działa tylko przez HTTPS. Otwórz adres z Tailscale (https://…ts.net) albo użyj apki.";
 }
 
-// ===== odtwarzanie odpowiedzi =====
-function stopSpeaking() {
-  speaking = false;
-  player.pause(); player.removeAttribute("src");
-  if ("speechSynthesis" in window) speechSynthesis.cancel();
-}
+// ===== odtwarzanie =====
 function hookPlayer() {
   if (playAnalyser) return;
   try {
@@ -328,51 +360,145 @@ function hookPlayer() {
     src.connect(playAnalyser); playAnalyser.connect(a.destination);
   } catch {}
 }
-function speak(text, b64) {
+function playOne(text, b64) {
   return new Promise((resolve) => {
-    const done = () => { speaking = false; resolve(); };
-    speaking = true;
     if (b64) {
       hookPlayer();
       player.src = "data:audio/wav;base64," + b64;
-      player.onended = done; player.onerror = done;
-      player.play().catch(done);
+      player.onended = resolve; player.onerror = resolve;
+      player.play().catch(resolve);
     } else if ("speechSynthesis" in window && text) {
       const u = new SpeechSynthesisUtterance(text);
-      u.lang = "pl-PL"; u.onend = done; u.onerror = done;
+      u.lang = "pl-PL"; u.onend = resolve; u.onerror = resolve;
       speechSynthesis.speak(u);
-    } else done();
+    } else resolve();
   });
 }
+// przerwanie: zatrzymuje mowę i strumień bieżącej odpowiedzi
+function stopSpeaking() {
+  if (turn) { turn.cancelled = true; turn.queue.length = 0; turn.finish(); }
+  if (abortCtl) { try { abortCtl.abort(); } catch {} abortCtl = null; }
+  speaking = false;
+  player.pause(); player.removeAttribute("src");
+  if ("speechSynthesis" in window) speechSynthesis.cancel();
+}
 
-async function handleReply(data) {
-  stopThinking();
-  if (data.heard) add("me", data.heard);
-  (data.searched || []).forEach((q) => add("net", "⌁ sieć: " + q));
-  const reply = data.reply || "(brak odpowiedzi)";
-  const el = add("ai", reply);
-  setMic(""); busy = false;
-  buzz(25); blip(1320, 0.05);
-  setStatus("transmisja…  (stuknij, żeby przerwać)");
-  await Promise.all([typeOut(el, reply), speak(reply, data.audio)]);
+// ===== jedna tura rozmowy (strumień zdań) =====
+function newTurn() {
+  const t = { el: null, text: "", queue: [], playing: false, streamDone: false, cancelled: false, typing: Promise.resolve() };
+  t.finished = new Promise((r) => { t.finish = () => { t.finish = () => {}; r(); }; });
+  return t;
+}
+function typeAppend(t, text) {
+  t.typing = t.typing.then(() => new Promise((resolve) => {
+    if (t.cancelled) { t.el.textContent = t.text; return resolve(); }
+    const el = t.el, start = el.textContent.length, target = (start ? el.textContent + " " : "") + text;
+    el.classList.add("cursor");
+    let i = start;
+    const step = Math.max(1, Math.round(text.length / 40));
+    const iv = setInterval(() => {
+      i += step; el.textContent = target.slice(0, i); log.scrollTop = log.scrollHeight;
+      if (i >= target.length) { clearInterval(iv); el.classList.remove("cursor"); resolve(); }
+    }, 16);
+  }));
+}
+function pump(t) {
+  if (t.playing || t.cancelled) return;
+  if (!t.queue.length) {
+    if (t.streamDone) { speaking = false; t.finish(); }
+    return;
+  }
+  t.playing = true; speaking = true;
+  const s = t.queue.shift();
+  const p = s.laptop ? new Promise((r) => setTimeout(r, 30)) : playOne(s.text, s.audio);
+  p.then(() => { t.playing = false; pump(t); });
+}
+
+function handleEvent(ev, t) {
+  switch (ev.type) {
+    case "status": if (!t.el) setStatus(ev.text, true); break;
+    case "heard": if (ev.text) add("me", ev.text); break;
+    case "search": add("net", "⌁ sieć: " + ev.query); break;
+    case "memory": add("net", "◆ " + ev.text); break;
+    case "phone": runPhone(ev); break;
+    case "arduino": arduinoCard(ev); break;
+    case "sentence":
+      if (t.cancelled) return;
+      if (!t.el) {
+        stopThinking(); busy = false; setMic("");
+        t.el = add("ai", "", { restore: true });
+        buzz(25); blip(1320, 0.05);
+        setStatus(ev.laptop ? "mówię z laptopa…" : "transmisja…  (stuknij, żeby przerwać)");
+      }
+      t.text += (t.text ? " " : "") + ev.text;
+      typeAppend(t, ev.text);
+      t.queue.push(ev); pump(t);
+      break;
+    case "done":
+      if (ev.reply && t.el) pushHistory("ai", ev.reply);
+      break;
+    case "error": throw new Error(ev.message);
+  }
+}
+
+async function runTurn(fd) {
+  stopSpeaking();
+  busy = true; setMic("busy"); startThinking();
+  fd.append("session", session);
+  fd.append("board", board);
+  fd.append("speak_on", opt.laptopVoice ? "laptop" : "phone");
+  const t = turn = newTurn();
+  abortCtl = new AbortController();
+  try {
+    const r = await fetch(apiUrl("api/stream"), { method: "POST", body: fd, signal: abortCtl.signal });
+    if (!r.ok) throw new Error("serwer " + r.status + ": " + (await r.text()).slice(0, 200));
+    const reader = r.body.getReader(), dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const ln = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+        if (ln) handleEvent(JSON.parse(ln), t);
+      }
+    }
+    if (buf.trim()) handleEvent(JSON.parse(buf), t);
+  } catch (e) {
+    if (t.cancelled || e.name === "AbortError") return;
+    fail(e); t.finish(); return;
+  } finally {
+    t.streamDone = true; pump(t);
+  }
+  if (!t.el) { stopThinking(); busy = false; setMic(""); }
+  await t.finished;
+  await t.typing;
+  if (t.cancelled || turn !== t) return;
   if (!recording && !busy) {
     setStatus("stuknij rdzeń i mów");
     if (convoMode) startRec();
   }
 }
 
-async function post(path, body, isForm) {
-  const r = await fetch(apiUrl(path), isForm ? { method: "POST", body }
-    : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  if (!r.ok) throw new Error("serwer " + r.status + ": " + (await r.text()).slice(0, 200));
-  return r.json();
-}
 function fail(e) {
   stopThinking();
-  busy = false; setMic(""); setStatus("stuknij rdzeń i mów");
+  busy = false; speaking = false; setMic(""); setStatus("stuknij rdzeń i mów");
   add("sys", "[błąd] " + e.message);
   blip(160, 0.18, "sawtooth"); buzz([40, 60, 40]);
   if (/fetch|network|Failed|serwera/i.test(e.message)) setNet(false);
+}
+async function postJson(path, body) {
+  const r = await fetch(apiUrl(path), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  return r.json();
+}
+
+// ===== akcje w telefonie =====
+function runPhone(ev) {
+  if (!NATIVE) { add("sys", "akcja „" + ev.action + "” działa tylko w apce na telefonie"); return; }
+  let res = "";
+  try { res = NATIVE.action(JSON.stringify(ev)); } catch (e) { res = "błąd: " + e.message; }
+  add("net", "▸ " + res);
 }
 
 // ===== nagrywanie z automatycznym stopem po ciszy =====
@@ -388,9 +514,9 @@ async function startRec() {
   }
   const a = ctx();
   if (!micAnalyser) {
-    micSrc = a.createMediaStreamSource(stream);
+    const src = a.createMediaStreamSource(stream);
     micAnalyser = a.createAnalyser(); micAnalyser.fftSize = 1024;
-    micSrc.connect(micAnalyser);
+    src.connect(micAnalyser);
   }
   const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"].find(
     (m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || "";
@@ -403,7 +529,6 @@ async function startRec() {
   buzz(15); blip(660, 0.05); setTimeout(() => blip(990, 0.05), 70);
   watchSilence();
 }
-
 function stopRec(cancel) {
   if (!recording) return;
   recording = false; clearInterval(vadTimer);
@@ -411,7 +536,6 @@ function stopRec(cancel) {
   else { blip(990, 0.05); setTimeout(() => blip(660, 0.05), 70); }
   recorder.stop();
 }
-
 function watchSilence() {
   const buf = new Float32Array(micAnalyser.fftSize);
   const t0 = Date.now(); let spoke = false, lastVoice = Date.now();
@@ -428,30 +552,30 @@ function watchSilence() {
     else if (now - t0 > 30000) stopRec(false);                    // limit 30 s
   }, 100);
 }
-
-async function sendRecording() {
-  busy = true; setMic("busy"); startThinking();
+function sendRecording() {
   const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
   const ext = (recorder.mimeType || "").includes("mp4") ? "m4a" : "webm";
   const fd = new FormData();
   fd.append("audio", blob, "rec." + ext);
-  fd.append("session", session);
-  try { await handleReply(await post("api/voice", fd, true)); } catch (e) { fail(e); }
+  runTurn(fd);
 }
-
-mic.addEventListener("click", () => {
+function talkToggle() {
   if (busy) return;
   if (recording) stopRec(false); else startRec();
-});
+}
+mic.addEventListener("click", talkToggle);
+// przycisk słuchawek / kierownicy i wywołanie jako asystent systemowy (z apki)
+window.onHeadsetButton = () => talkToggle();
+let wantListen = false;
+window.onAssist = () => { if (booted) startRec(); else wantListen = true; };
 
-async function sendText(text) {
+function sendText(text) {
   if (!text || busy) return;
   if (IN_APP && !server) { openSettings(); return; }
-  stopSpeaking();
-  add("me", text); busy = true; setMic("busy"); startThinking();
+  add("me", text);
   blip(880, 0.04);
-  try { const d = await post("api/chat", { text, session }); d.heard = ""; await handleReply(d); }
-  catch (err) { fail(err); }
+  const fd = new FormData(); fd.append("text", text);
+  runTurn(fd);
 }
 $("form").addEventListener("submit", (e) => {
   e.preventDefault();
@@ -464,6 +588,8 @@ const QUICK = {
   "⚡ CO NOWEGO": "Co nowego dzisiaj w wiadomościach? Sprawdź w internecie.",
   "⏱ GODZINA": "Która jest godzina i jaki dziś dzień?",
   "☺ ŻART": "Opowiedz krótki żart.",
+  "⏲ MINUTNIK 5 MIN": "Ustaw minutnik na 5 minut.",
+  "⚙ MIGAJ DIODĄ": "Napisz program na moją płytkę, który miga wbudowaną diodą co pół sekundy.",
   "⌘ CO POTRAFISZ": "W dwóch zdaniach: co potrafisz?",
 };
 document.querySelectorAll(".q").forEach((b) => b.addEventListener("click", () => sendText(QUICK[b.textContent])));
@@ -475,10 +601,103 @@ $("convo").addEventListener("click", () => {
   add("sys", convoMode ? "tryb rozmowy: ON — po odpowiedzi słucham dalej" : "tryb rozmowy: OFF");
 });
 
+// ===== karta programu Arduino / ESP =====
+function boardOptions(sel, current) {
+  sel.innerHTML = "";
+  const none = document.createElement("option"); none.value = ""; none.textContent = "— wybierz płytkę —"; sel.appendChild(none);
+  for (const b of boards) {
+    const o = document.createElement("option");
+    o.value = b.fqbn; o.textContent = b.name + (OTG_OK.test(b.fqbn) ? "" : " (tylko laptop)");
+    sel.appendChild(o);
+  }
+  sel.value = current || "";
+}
+function arduinoCard(ev) {
+  const d = document.createElement("div");
+  d.className = "msg ard"; d.dataset.h = LABEL.ard + " · " + hhmm(Date.now());
+  d.innerHTML = `<div class="ard-sum"></div>
+    <details><summary></summary><pre class="code"></pre></details>
+    <div class="ard-row"><select class="ard-board"></select></div>
+    <div class="ard-row"><button class="btn solid ard-otg">⚡ WGRAJ PRZEZ USB</button><button class="btn ard-pc">WGRAJ Z LAPTOPA</button></div>
+    <div class="ard-row ard-ports" style="display:none"><select class="ard-port"></select></div>
+    <div class="bar"><i></i></div><pre class="ard-log"></pre>`;
+  const q = (c) => d.querySelector(c);
+  q(".ard-sum").textContent = ev.summary || "Program gotowy do wgrania.";
+  q("summary").textContent = "kod (" + ev.code.split("\n").length + " linii)";
+  q(".code").textContent = ev.code;
+  const sel = q(".ard-board"); boardOptions(sel, ev.fqbn || board);
+  const logEl = q(".ard-log");
+  const setLog = (txt, cls) => { logEl.textContent = txt; logEl.className = "ard-log" + (cls ? " " + cls : ""); };
+  if (ev.ok === false) setLog("Kompilacja nie przeszła:\n" + ev.log, "bad");
+  else if (ev.log) setLog(ev.log);
+  else setLog("Skompilowane. Podłącz płytkę i wgraj.", "ok");
+  const otg = q(".ard-otg"), pc = q(".ard-pc");
+  const refresh = () => { otg.disabled = !NATIVE || !OTG_OK.test(sel.value); };
+  sel.addEventListener("change", () => { board = sel.value; store.set("board", board); refresh(); });
+  refresh();
+  if (!NATIVE) otg.title = "Wgrywanie przez USB działa w apce na telefonie";
+
+  otg.addEventListener("click", () => {
+    if (!sel.value) { setLog("Wybierz płytkę.", "bad"); return; }
+    flashCard = { bar: q(".bar"), setLog, btns: [otg, pc] };
+    flashCard.bar.style.display = "block"; flashCard.bar.firstChild.style.width = "0";
+    otg.disabled = pc.disabled = true;
+    setLog("łączę się z płytką…");
+    blip(700, 0.05);
+    NATIVE.flash(JSON.stringify({ server, id: ev.id, fqbn: sel.value }));
+  });
+
+  pc.addEventListener("click", async () => {
+    if (!sel.value) { setLog("Wybierz płytkę.", "bad"); return; }
+    const portsRow = q(".ard-ports"), portSel = q(".ard-port");
+    let port = portsRow.style.display === "none" ? "" : portSel.value;
+    if (!port) {
+      setLog("szukam płytki na laptopie…");
+      try {
+        const r = await fetch(apiUrl("api/arduino/ports")).then((x) => x.json());
+        if (!r.cli) { setLog("Na laptopie brak arduino-cli (instrukcja w README).", "bad"); return; }
+        if (!r.ports.length) { setLog("Laptop nie widzi żadnej płytki na USB.", "bad"); return; }
+        if (r.ports.length > 1) {
+          portSel.innerHTML = "";
+          r.ports.forEach((p) => { const o = document.createElement("option"); o.value = p.port; o.textContent = p.port + " " + (p.boards[0]?.name || p.label || ""); portSel.appendChild(o); });
+          portsRow.style.display = "flex"; setLog("Wybierz port i kliknij jeszcze raz."); return;
+        }
+        port = r.ports[0].port;
+      } catch (e) { setLog("[błąd] " + e.message, "bad"); return; }
+    }
+    pc.disabled = otg.disabled = true;
+    const bar = q(".bar"); bar.style.display = "block"; bar.firstChild.style.width = "50%";
+    setLog("kompiluję i wgrywam przez " + port + "… (pierwszy raz ESP32 potrafi trwać kilka minut)");
+    try {
+      const r = await postJson("api/arduino/upload", { id: ev.id, port, fqbn: sel.value });
+      bar.firstChild.style.width = r.ok ? "100%" : "0";
+      setLog((r.ok ? "✓ wgrane\n" : "✗ nie udało się\n") + (r.log || ""), r.ok ? "ok" : "bad");
+      r.ok ? (blip(1320, 0.08), buzz(60)) : blip(160, 0.2, "sawtooth");
+    } catch (e) { setLog("[błąd] " + e.message, "bad"); }
+    pc.disabled = false; refresh();
+  });
+
+  log.appendChild(d); log.scrollTop = log.scrollHeight;
+  pushHistory("sys", "program Arduino: " + (ev.summary || ev.id));
+  blip(990, 0.06);
+}
+// postęp wgrywania z apki (USB OTG)
+window.onFlash = (o) => {
+  if (!flashCard) return;
+  flashCard.bar.firstChild.style.width = Math.max(0, Math.min(100, o.pct)) + "%";
+  if (!o.done) { flashCard.setLog(o.stage + "  " + o.pct + "%"); return; }
+  flashCard.setLog((o.ok ? "✓ " : "✗ ") + (o.msg || o.stage), o.ok ? "ok" : "bad");
+  if (o.ok) { blip(1320, 0.08); buzz(80); } else { blip(160, 0.2, "sawtooth"); buzz([40, 60, 40]); }
+  flashCard.btns.forEach((b) => (b.disabled = false));
+  flashCard = null;
+};
+
 // ===== ustawienia =====
 function openSettings() {
   $("srv").value = server || (IN_APP ? "" : location.origin + "/");
   $("srvState").textContent = IN_APP ? "" : "Strona otwarta z laptopa – adres ustawia się sam.";
+  boardOptions($("boardSel"), board);
+  loadMemory();
   $("settings").classList.add("open");
 }
 function closeSettings() { $("settings").classList.remove("open"); }
@@ -488,10 +707,25 @@ async function testServer(base) {
   return r.json();
 }
 function showInfo(h) {
+  const yn = (v) => (v ? "TAK" : "NIE");
   $("info").textContent = h
-    ? `model: ${h.model || "(pierwszy załadowany)"}\nmowa: whisper ${h.whisper}\ngłos: ${h.piper ? "Piper (laptop)" : "głos telefonu"}\ninternet: ${h.search ? "TAK" : "NIE (brak paczki ddgs)"}`
+    ? `serwer: v${h.version || "?"}  model: ${h.model || "(pierwszy załadowany)"}\nmowa: whisper ${h.whisper}  głos: ${h.piper ? "Piper" : "telefonu"}\n` +
+      `internet: ${yn(h.search)}  arduino-cli: ${yn(h.arduino)}  dom: ${yn(h.ha)}\ngłośnik laptopa: ${yn(h.laptop_audio)}  pamięć: ${h.memory ?? 0} faktów`
     : "serwer niedostępny";
 }
+async function loadMemory() {
+  const ul = $("memList"); ul.innerHTML = "";
+  try {
+    const r = await fetch(apiUrl("api/memory")).then((x) => x.json());
+    if (!r.items.length) { ul.innerHTML = "<li>pusto — powiedz np. „zapamiętaj, że mam ESP32”</li>"; return; }
+    r.items.slice(-20).forEach((t) => { const li = document.createElement("li"); li.textContent = t; ul.appendChild(li); });
+  } catch { ul.innerHTML = "<li>brak połączenia</li>"; }
+}
+$("memClear").addEventListener("click", async () => {
+  try { await fetch(apiUrl("api/memory"), { method: "DELETE" }); } catch {}
+  loadMemory(); blip(330, 0.08);
+});
+$("boardSel").addEventListener("change", (e) => { board = e.target.value; store.set("board", board); });
 $("gear").addEventListener("click", () => { blip(700, 0.04); openSettings(); });
 $("srvClose").addEventListener("click", closeSettings);
 $("srvTest").addEventListener("click", async () => {
@@ -512,17 +746,32 @@ $("srvSave").addEventListener("click", () => {
 document.querySelectorAll(".tg").forEach((b) => b.addEventListener("click", () => {
   const k = b.dataset.k; fx[k] = !fx[k]; store.set("fx_" + k, fx[k] ? "1" : "0"); applyFx(); blip(800, 0.03);
 }));
+function applyNative() {
+  if (!NATIVE) return;
+  try { NATIVE.setHeadsetButton(opt.headset); } catch {}
+  if (opt.btMic) { try { $("btState").textContent = "mikrofon BT: " + NATIVE.setBtMic(true); } catch {} }
+}
+document.querySelectorAll(".op").forEach((b) => b.addEventListener("click", () => {
+  const k = b.dataset.k; opt[k] = !opt[k]; store.set("opt_" + k, opt[k] ? "1" : "0"); applyFx(); blip(800, 0.03);
+  if (!NATIVE) return;
+  if (k === "btMic") $("btState").textContent = "mikrofon BT: " + NATIVE.setBtMic(opt.btMic);
+  if (k === "headset") NATIVE.setHeadsetButton(opt.headset);
+}));
 $("clear").addEventListener("click", async () => {
   stopSpeaking(); log.innerHTML = ""; history = []; store.set("history", "[]");
-  try { await post("api/reset", { text: "", session }); } catch {}
-  add("sys", "// pamięć rozmowy wyczyszczona"); closeSettings();
+  try { await postJson("api/reset", { text: "", session }); } catch {}
+  add("sys", "// rozmowa wyczyszczona"); closeSettings();
 });
 
 async function checkHealth() {
   if (IN_APP && !server) { setNet(false); showInfo(null); return false; }
   setNet(null);
-  try { const h = await testServer(server); setNet(true); showInfo(h); return h; }
-  catch { setNet(false); showInfo(null); return false; }
+  try {
+    const h = await testServer(server);
+    setNet(true); showInfo(h);
+    if (h.arduino) fetch(apiUrl("api/arduino/ports")).then((x) => x.json()).then((r) => { if (r.boards?.length) boards = r.boards; }).catch(() => {});
+    return h;
+  } catch { setNet(false); showInfo(null); return false; }
 }
 
 // ===== wizualizer wokół rdzenia =====
@@ -547,7 +796,7 @@ async function checkHealth() {
       return freq[1 + (i % (N / 2)) * 2] / 255;
     }
     if (speaking) return 0.35 + 0.3 * Math.abs(Math.sin(t / 140 + i * 0.7)) * Math.random();
-    if (busy) return 0.15 + 0.15 * Math.max(0, Math.sin(t / 120 - i * 0.45));
+    if (busy || flashCard) return 0.15 + 0.15 * Math.max(0, Math.sin(t / 120 - i * 0.45));
     return 0.06 + 0.04 * Math.sin(t / 900 + i * 0.3);
   }
   function frame(t) {
@@ -565,9 +814,8 @@ async function checkHealth() {
       g.lineWidth = 2.4;
       g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke();
     }
-    // obracający się pierścień
     g.strokeStyle = "rgba(0,255,65,.25)"; g.lineWidth = 1;
-    g.setLineDash([3, 7]); g.lineDashOffset = -t / (busy ? 15 : 60);
+    g.setLineDash([3, 7]); g.lineDashOffset = -t / (busy || flashCard ? 15 : 60);
     g.beginPath(); g.arc(cx, cy, r0 + 33, 0, Math.PI * 2); g.stroke(); g.setLineDash([]);
   }
   requestAnimationFrame(frame);
@@ -589,7 +837,7 @@ async function checkHealth() {
   function frame(t) {
     requestAnimationFrame(frame);
     if (document.hidden || !fx.rain) return;
-    const speed = recording || busy || speaking ? 35 : 60;   // przyspiesza, gdy asystent pracuje
+    const speed = recording || busy || speaking || flashCard ? 35 : 60;
     if (t - last < speed) return;
     last = t;
     g.fillStyle = "rgba(0,0,0,0.08)"; g.fillRect(0, 0, innerWidth, innerHeight);
@@ -610,6 +858,7 @@ async function checkHealth() {
 // ===== start =====
 history.forEach((m) => add(m.cls, m.text, { restore: true, t: m.t }));
 if (history.length) add("sys", "// przywrócono poprzednią rozmowę");
+applyNative();
 
 (async function boot() {
   const box = $("boot");
@@ -623,16 +872,22 @@ if (history.length) add("sys", "// przywrócono poprzednią rozmowę");
     for (let i = 1; i <= txt.length; i++) { d.textContent = txt.slice(0, i); if (!skip && i % 3 === 0) await wait(8); }
     if (cls) { const s = document.createElement("span"); s.className = cls[0]; s.textContent = " " + cls[1]; d.appendChild(s); }
   };
-  await line("ASYSTENT OS v1.2 // build " + new Date().getFullYear());
+  let usb = false;
+  try { usb = NATIVE && JSON.parse(NATIVE.info()).usbHost; } catch {}
+  await line("ASYSTENT OS v1.3 // build " + new Date().getFullYear());
   await wait(150);
   await line("> inicjalizacja rdzenia......", ["ok", "[OK]"]);
   await line("> moduł nasłuchu..............", ["ok", window.isSecureContext ? "[OK]" : "[BRAK HTTPS]"]);
   await line("> synteza mowy................", ["ok", "[OK]"]);
+  if (NATIVE) await line("> port USB OTG................", usb ? ["ok", "[OK]"] : ["bad", "[BRAK]"]);
   await line("> łącze z serwerem............");
   const h = await healthP;
   const last = box.lastChild, s = document.createElement("span");
   s.className = h ? "ok" : "bad"; s.textContent = h ? " [ONLINE]" : " [OFFLINE]"; last.appendChild(s);
-  if (h) await line("> dostęp do sieci.............", h.search ? ["ok", "[OK]"] : ["bad", "[BRAK]"]);
+  if (h) {
+    await line("> dostęp do sieci.............", h.search ? ["ok", "[OK]"] : ["bad", "[BRAK]"]);
+    await line("> kompilator arduino..........", h.arduino ? ["ok", "[OK]"] : ["bad", "[BRAK]"]);
+  }
   await wait(250);
   await line(h ? "> system gotowy." : "> tryb offline — ustaw serwer w ⚙");
   await wait(500);
@@ -641,9 +896,11 @@ if (history.length) add("sys", "// przywrócono poprzednią rozmowę");
 })();
 
 function afterBoot(h) {
-  if (!history.length) add("sys", "asystent v1.2 // system gotowy");
+  booted = true;
+  if (!history.length) add("sys", "asystent v1.3 // system gotowy");
   if (IN_APP && !server) add("sys", "brak serwera — ustaw adres w ⚙");
   else if (!h) add("sys", "serwer offline — sprawdzę ponownie co 15 s");
+  if (wantListen) { wantListen = false; startRec(); }
 }
 setInterval(() => { if ($("net").className === "err" && (server || !IN_APP)) checkHealth(); }, 15000);
 

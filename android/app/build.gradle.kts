@@ -10,8 +10,8 @@ android {
         applicationId = "pl.asystent"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 4
+        versionName = "1.3"
     }
 
     // Interfejs (ten sam co na serwerze) jest wbudowany w apkę.
@@ -33,4 +33,5 @@ android {
 
 dependencies {
     implementation("androidx.webkit:webkit:1.12.1")
+    implementation("com.github.mik3y:usb-serial-for-android:3.8.1")
 }
