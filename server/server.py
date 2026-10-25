@@ -5,10 +5,12 @@ Uruchom: python server.py
 """
 import base64
 import io
+import json
 import os
 import re
 import tempfile
 import wave
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -89,21 +91,110 @@ async def pick_model(client: httpx.AsyncClient) -> str:
     return _model_cache["id"]
 
 
-async def ask_llm(session: str, text: str) -> str:
+# --- wyszukiwanie w internecie (DuckDuckGo, bez klucza API) ---
+try:
+    from ddgs import DDGS  # nowa nazwa paczki
+except ImportError:  # pragma: no cover
+    try:
+        from duckduckgo_search import DDGS
+    except ImportError:
+        DDGS = None
+
+SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": "Szuka aktualnych informacji w internecie (wiadomości, pogoda, ceny, wyniki, fakty po dacie treningu).",
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "Krótkie zapytanie do wyszukiwarki"}},
+            "required": ["query"],
+        },
+    },
+}
+FORCE_SEARCH = re.compile(
+    r"\b(wyszukaj|poszukaj|wygoogluj|sprawd[źz] w (internecie|sieci)|znajd[źz] w (internecie|sieci)|"
+    r"co nowego|najnowsze|aktualn\w*|dzisiaj|pogod\w*|kurs\w*)\b",
+    re.I,
+)
+_tools_supported = {"ok": DDGS is not None}
+DNI = ["poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sobota", "niedziela"]
+
+
+def web_search(query: str, n: int = 5) -> str:
+    if DDGS is None:
+        return "Wyszukiwarka niedostępna (zainstaluj paczkę ddgs)."
+    try:
+        with DDGS() as ddg:
+            hits = list(ddg.text(query, region="pl-pl", max_results=n))
+    except Exception as e:  # noqa: BLE001
+        return f"Błąd wyszukiwania: {e}"
+    if not hits:
+        return "Brak wyników."
+    return "\n".join(f"- {h.get('title','')}: {h.get('body','')} ({h.get('href','')})" for h in hits)
+
+
+def system_prompt() -> str:
+    now = datetime.now()
+    return (
+        f"{SYSTEM_PROMPT}\nDziś jest {DNI[now.weekday()]}, {now:%d.%m.%Y}, godzina {now:%H:%M}. "
+        "Gdy pytanie dotyczy rzeczy aktualnych, użyj narzędzia web_search. "
+        "Korzystając z wyników, odpowiadaj własnymi słowami i nie czytaj adresów stron."
+    )
+
+
+async def llm_call(client: httpx.AsyncClient, model: str, messages: list, use_tools: bool) -> dict:
+    body = {"model": model, "messages": messages, "temperature": 0.7}
+    if use_tools:
+        body["tools"] = [SEARCH_TOOL]
+    r = await client.post(f"{LLM_URL}/chat/completions", json=body)
+    if use_tools and r.status_code in (400, 422, 500):
+        # model / serwer nie obsługuje narzędzi – dalej bez nich
+        _tools_supported["ok"] = False
+        return await llm_call(client, model, messages, False)
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]
+
+
+async def ask_llm(session: str, text: str) -> tuple[str, list[str]]:
     hist = sessions.setdefault(session, [])
     hist.append({"role": "user", "content": text})
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + hist[-MAX_TURNS * 2 :]
+    messages = [{"role": "system", "content": system_prompt()}] + hist[-MAX_TURNS * 2 :]
+    searched: list[str] = []
+
+    # słowa-klucze wymuszają wyszukanie także dla modeli, które nie umieją narzędzi
+    if DDGS is not None and FORCE_SEARCH.search(text):
+        searched.append(text)
+        results = await run_in_threadpool(web_search, text)
+        # dołączone do pytania (część szablonów czatu nie przyjmuje drugiej wiadomości systemowej)
+        messages[-1] = {"role": "user", "content": f"{text}\n\n[Wyniki wyszukiwania w internecie]\n{results}"}
+
+    reply = ""
     async with httpx.AsyncClient(timeout=300) as client:
         model = await pick_model(client)
-        r = await client.post(
-            f"{LLM_URL}/chat/completions",
-            json={"model": model, "messages": messages, "temperature": 0.7},
-        )
-        r.raise_for_status()
-        reply = r.json()["choices"][0]["message"]["content"] or ""
+        for _ in range(3):
+            msg = await llm_call(client, model, messages, _tools_supported["ok"])
+            calls = msg.get("tool_calls") or []
+            if not calls:
+                reply = msg.get("content") or ""
+                break
+            messages.append({"role": "assistant", "content": msg.get("content") or "", "tool_calls": calls})
+            for c in calls:
+                try:
+                    q = json.loads(c["function"].get("arguments") or "{}").get("query") or text
+                except (json.JSONDecodeError, KeyError, AttributeError):
+                    q = text
+                searched.append(q)
+                res = await run_in_threadpool(web_search, q)
+                messages.append({"role": "tool", "tool_call_id": c.get("id", "call"), "content": res})
+        else:
+            msg = await llm_call(client, model, messages, False)
+            reply = msg.get("content") or ""
+
     reply = re.sub(r"<think>.*?</think>", "", reply, flags=re.S).strip()  # modele "myślące"
+    reply = re.sub(r"[*#`_]+", "", reply)  # bez markdownu – idzie do syntezy mowy
     hist.append({"role": "assistant", "content": reply})
-    return reply
+    return reply, searched
 
 
 def transcribe(path: str) -> str:
@@ -140,14 +231,16 @@ async def voice(audio: UploadFile = File(...), session: str = Form("default")):
         os.unlink(path)
     if not heard:
         return {"heard": "", "reply": "Nic nie usłyszałem, spróbuj jeszcze raz.", "audio": None}
-    reply = await ask_llm(session, heard)
-    return {"heard": heard, "reply": reply, "audio": await run_in_threadpool(synthesize, reply)}
+    reply, searched = await ask_llm(session, heard)
+    return {"heard": heard, "reply": reply, "searched": searched,
+            "audio": await run_in_threadpool(synthesize, reply)}
 
 
 @app.post("/api/chat")
 async def chat(body: ChatIn):
-    reply = await ask_llm(body.session, body.text)
-    return {"heard": body.text, "reply": reply, "audio": await run_in_threadpool(synthesize, reply)}
+    reply, searched = await ask_llm(body.session, body.text)
+    return {"heard": body.text, "reply": reply, "searched": searched,
+            "audio": await run_in_threadpool(synthesize, reply)}
 
 
 @app.post("/api/reset")
@@ -158,7 +251,8 @@ async def reset(body: ChatIn):
 
 @app.get("/api/health")
 async def health():
-    return {"llm": LLM_URL, "whisper": WHISPER_MODEL, "piper": piper_voice is not None}
+    return {"llm": LLM_URL, "whisper": WHISPER_MODEL, "piper": piper_voice is not None,
+            "search": DDGS is not None, "model": _model_cache.get("id", LLM_MODEL)}
 
 
 @app.get("/")
