@@ -8,6 +8,7 @@ programy na Arduino/ESP (kompilacja przez arduino-cli, wgranie po potwierdzeniu 
 
 Uruchom: python server.py
 """
+import asyncio
 import base64
 import io
 import json
@@ -163,17 +164,194 @@ FORCE_SEARCH = re.compile(
 DNI = ["poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sobota", "niedziela"]
 
 
-def web_search(query: str, n: int = 5) -> str:
+try:
+    import trafilatura  # wyciąga właściwą treść artykułu ze strony
+except ImportError:  # pragma: no cover
+    trafilatura = None
+
+NEWS_HINT = re.compile(r"\b(dzi[śs]|dzisiaj|wczoraj|najnowsz\w*|wiadomo[śs]\w*|news\w*|aktualn\w*|teraz|w tym tygodniu|wynik\w*)\b", re.I)
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36"
+_search_cache: dict[str, tuple[float, object]] = {}
+_web: dict[str, httpx.AsyncClient] = {}
+
+
+def cache_get(key: str, ttl: float):
+    v = _search_cache.get(key)
+    return v[1] if v and time.time() - v[0] < ttl else None
+
+
+def cache_put(key: str, val) -> None:
+    if len(_search_cache) > 300:
+        for k in sorted(_search_cache, key=lambda k: _search_cache[k][0])[:100]:
+            _search_cache.pop(k, None)
+    _search_cache[key] = (time.time(), val)
+
+
+def web_client() -> httpx.AsyncClient:
+    """Jeden klient dla wszystkich pobrań – ponowne użycie połączeń."""
+    if "c" not in _web:
+        _web["c"] = httpx.AsyncClient(timeout=httpx.Timeout(7, connect=4), follow_redirects=True,
+                                      headers={"User-Agent": UA, "Accept-Language": "pl,en;q=0.8"},
+                                      limits=httpx.Limits(max_connections=20))
+    return _web["c"]
+
+
+def ddg_hits(query: str, news: bool, n: int = 8) -> list[dict]:
     if DDGS is None:
-        return "Wyszukiwarka niedostępna (zainstaluj paczkę ddgs)."
+        return []
+    out = []
     try:
         with DDGS() as ddg:
-            hits = list(ddg.text(query, region="pl-pl", max_results=n))
+            if news:
+                for h in ddg.news(query, region="pl-pl", max_results=n):
+                    out.append({"title": h.get("title", ""), "url": h.get("url") or h.get("href", ""),
+                                "body": h.get("body", ""), "date": (h.get("date") or "")[:10], "source": h.get("source", "")})
+            for h in ddg.text(query, region="pl-pl", max_results=n):
+                out.append({"title": h.get("title", ""), "url": h.get("href") or h.get("url", ""),
+                            "body": h.get("body", ""), "date": "", "source": ""})
     except Exception as e:  # noqa: BLE001
-        return f"Błąd wyszukiwania: {e}"
+        print(f"[!] wyszukiwarka: {e}")
+    return [h for h in out if h["url"].startswith("http")]
+
+
+def domain(url: str) -> str:
+    m = re.match(r"https?://(?:www\.)?([^/:]+)", url)
+    return m.group(1) if m else url
+
+
+def html_to_text(html: str) -> str:
+    if trafilatura is not None:
+        try:
+            t = trafilatura.extract(html, include_comments=False, include_tables=True, favor_precision=True)
+            if t:
+                return t
+        except Exception:  # noqa: BLE001
+            pass
+    html = re.sub(r"(?is)<(script|style|noscript|nav|footer|header|aside).*?</\1>", " ", html)
+    t = re.sub(r"(?s)<[^>]+>", " ", html)
+    return re.sub(r"[ \t\r\f\v]+", " ", re.sub(r"\n\s*\n+", "\n", t)).strip()
+
+
+async def fetch_text(url: str, limit: int = 60000) -> str:
+    hit = cache_get("page:" + url, 1800)
+    if hit is not None:
+        return hit
+    try:
+        async with web_client().stream("GET", url) as r:
+            if r.status_code >= 400 or "html" not in r.headers.get("content-type", "html"):
+                return ""
+            buf = b""
+            async for chunk in r.aiter_bytes():
+                buf += chunk
+                if len(buf) > 2_000_000:
+                    break
+        text = await run_in_threadpool(html_to_text, buf.decode(r.encoding or "utf-8", "replace"))
+    except Exception:  # noqa: BLE001
+        return ""
+    text = text[:limit]
+    cache_put("page:" + url, text)
+    return text
+
+
+def stems(text: str) -> set[str]:
+    return {w[:5] for w in re.findall(r"[\wąćęłńóśźż]{3,}", text.lower())}
+
+
+def best_passages(text: str, query: str, limit: int = 1400) -> str:
+    """Wybiera z tekstu strony akapity najbardziej pasujące do pytania (w oryginalnej kolejności)."""
+    paras = [p.strip() for p in re.split(r"\n+", text) if len(p.strip()) > 40]
+    if not paras:
+        return text[:limit]
+    q = stems(query)
+    scored = sorted(range(len(paras)), key=lambda i: -(len(q & stems(paras[i])) + (0.5 if re.search(r"\d", paras[i]) else 0)))
+    chosen, total = [], 0
+    for i in scored:
+        if total > limit:
+            break
+        chosen.append(i)
+        total += len(paras[i])
+    return "\n".join(paras[i] for i in sorted(chosen))[: limit + 300]
+
+
+async def deep_search(query: str, mode: str = "auto", pages: int = 4) -> tuple[str, list[dict]]:
+    """Wyszukiwanie + równoległe czytanie najlepszych stron. Zwraca (kontekst dla modelu, źródła)."""
+    news = mode == "news" or (mode == "auto" and bool(NEWS_HINT.search(query)))
+    key = f"s:{news}:{query.lower().strip()}"
+    hit = cache_get(key, 600 if news else 3600)
+    if hit is not None:
+        return hit
+    hits = await run_in_threadpool(ddg_hits, query, news)
     if not hits:
-        return "Brak wyników."
-    return "\n".join(f"- {h.get('title', '')}: {h.get('body', '')}" for h in hits)
+        return ("Brak wyników (albo wyszukiwarka niedostępna).", [])
+    seen, top = set(), []
+    for h in hits:  # najlepsze wyniki, po jednym z domeny
+        d = domain(h["url"])
+        if d not in seen:
+            seen.add(d)
+            top.append(h)
+    picked = top[:pages]
+    texts = await asyncio.gather(*(fetch_text(h["url"]) for h in picked))
+    parts = []
+    for i, (h, t) in enumerate(zip(picked, texts), 1):
+        body = best_passages(t, query) if len(t) > 200 else h["body"]
+        meta = ", ".join(x for x in (domain(h["url"]), h["date"]) if x)
+        parts.append(f"[{i}] {h['title']} ({meta})\n{body}")
+    for h in top[pages:pages + 4]:
+        parts.append(f"- {h['title']} ({domain(h['url'])}): {h['body']}")
+    ctx = (f"Wyniki wyszukiwania dla: {query} (pobrano {datetime.now():%d.%m.%Y %H:%M})\n\n" + "\n\n".join(parts))[:9000]
+    sources = [{"title": h["title"][:90], "url": h["url"]} for h in picked]
+    cache_put(key, (ctx, sources))
+    return ctx, sources
+
+
+async def read_url(url: str) -> str:
+    if not re.match(r"https?://", url):
+        return "Podaj pełny adres strony (http/https)."
+    t = await fetch_text(url, limit=12000)
+    return t[:8000] if t else "Nie udało się pobrać strony."
+
+
+# --- Pogoda (Open-Meteo, bez klucza) ---
+WMO = {0: "bezchmurnie", 1: "prawie bezchmurnie", 2: "częściowe zachmurzenie", 3: "pochmurno", 45: "mgła", 48: "szadź",
+       51: "lekka mżawka", 53: "mżawka", 55: "gęsta mżawka", 61: "słaby deszcz", 63: "deszcz", 65: "ulewa",
+       66: "marznący deszcz", 67: "silny marznący deszcz", 71: "słaby śnieg", 73: "śnieg", 75: "intensywny śnieg",
+       77: "ziarna śniegu", 80: "przelotny deszcz", 81: "przelotne opady", 82: "gwałtowne ulewy", 85: "przelotny śnieg",
+       86: "intensywny przelotny śnieg", 95: "burza", 96: "burza z gradem", 99: "silna burza z gradem"}
+
+
+async def weather(city: str, days: int = 3) -> tuple[str, list[dict]]:
+    city = (city or os.getenv("HOME_CITY", "")).strip()
+    if not city:
+        return "Nie wiem, dla jakiego miasta – zapytaj użytkownika.", []
+    key = f"w:{city.lower()}:{days}"
+    hit = cache_get(key, 900)
+    if hit is not None:
+        return hit
+    c = web_client()
+    try:
+        g = (await c.get("https://geocoding-api.open-meteo.com/v1/search",
+                         params={"name": city, "count": 1, "language": "pl"})).json().get("results") or []
+        if not g:
+            return f"Nie znalazłem miejscowości „{city}”. Podaj nazwę w mianowniku, np. Kraków.", []
+        loc = g[0]
+        f = (await c.get("https://api.open-meteo.com/v1/forecast", params={
+            "latitude": loc["latitude"], "longitude": loc["longitude"], "timezone": "auto", "forecast_days": max(1, min(days, 7)),
+            "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m,precipitation,relative_humidity_2m",
+            "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,weather_code",
+        })).json()
+    except Exception as e:  # noqa: BLE001
+        return f"Serwis pogodowy niedostępny: {e}", []
+    cur, d = f.get("current", {}), f.get("daily", {})
+    lines = [f"Pogoda: {loc['name']}, {loc.get('admin1', '')} ({loc.get('country', '')}). "
+             f"Teraz: {cur.get('temperature_2m')}°C (odczuwalna {cur.get('apparent_temperature')}°C), "
+             f"{WMO.get(cur.get('weather_code'), '?')}, wiatr {cur.get('wind_speed_10m')} km/h, wilgotność {cur.get('relative_humidity_2m')}%."]
+    for i, day in enumerate(d.get("time", [])):
+        lines.append(f"{day}: {d['temperature_2m_min'][i]}…{d['temperature_2m_max'][i]}°C, "
+                     f"{WMO.get(d['weather_code'][i], '?')}, szansa opadów {d['precipitation_probability_max'][i]}%, "
+                     f"opad {d['precipitation_sum'][i]} mm")
+    out = ("\n".join(lines), [{"title": f"Open-Meteo: {loc['name']}", "url": "https://open-meteo.com/"}])
+    cache_put(key, out)
+    return out
 
 
 # --- Pamięć długoterminowa ---
@@ -300,8 +478,15 @@ async def tools_for(client: httpx.AsyncClient) -> list[dict]:
              ["action"]),
     ]
     if DDGS is not None:
-        t.append(tool("web_search", "Szuka aktualnych informacji w internecie (wiadomości, pogoda, ceny, wyniki).",
-                      {"query": {"type": "string"}}, ["query"]))
+        t.append(tool("web_search",
+                      "Szuka w internecie i czyta treść najlepszych stron. Używaj do wszystkiego, co aktualne albo "
+                      "niepewne: wiadomości, ceny, wyniki, specyfikacje, ludzie, firmy. Zadawaj konkretne zapytania; "
+                      "przy złożonym pytaniu wywołaj kilka razy z różnymi zapytaniami. mode=news dla świeżych wiadomości.",
+                      {"query": {"type": "string"}, "mode": {"type": "string", "enum": ["auto", "news"]}}, ["query"]))
+    t.append(tool("read_url", "Pobiera i czyta treść konkretnej strony internetowej (pełny adres URL).",
+                  {"url": {"type": "string"}}, ["url"]))
+    t.append(tool("weather", "Aktualna pogoda i prognoza na kilka dni dla miejscowości (nazwa w mianowniku, np. Kraków).",
+                  {"city": {"type": "string"}, "days": {"type": "integer"}}, ["city"]))
     if ARDUINO_CLI:
         t.append(tool("arduino_sketch",
                       "Pisze i kompiluje kompletny program (szkic .ino) na płytkę Arduino lub ESP podpiętą do laptopa. "
@@ -328,7 +513,8 @@ class Ctx:
 
 
 TOOL_STATUS = {
-    "web_search": "przeszukuję sieć…", "arduino_sketch": "kompiluję program…", "remember": "zapisuję w pamięci…",
+    "web_search": "przeszukuję sieć i czytam strony…", "read_url": "czytam stronę…", "weather": "sprawdzam pogodę…",
+    "arduino_sketch": "kompiluję program…", "remember": "zapisuję w pamięci…",
     "forget_memory": "czyszczę pamięć…", "phone_action": "wysyłam do telefonu…", "home_assistant": "steruję domem…",
 }
 
@@ -336,8 +522,18 @@ TOOL_STATUS = {
 async def exec_tool(name: str, args: dict, ctx: Ctx, client: httpx.AsyncClient) -> str:
     if name == "web_search":
         q = str(args.get("query") or "")
-        ctx.events.append({"type": "search", "query": q})
-        return await run_in_threadpool(web_search, q)
+        res, src = await deep_search(q, str(args.get("mode") or "auto"))
+        ctx.events.append({"type": "search", "query": q, "sources": src})
+        return res
+    if name == "read_url":
+        url = str(args.get("url") or "")
+        ctx.events.append({"type": "search", "query": "czytam " + domain(url), "sources": [{"title": domain(url), "url": url}]})
+        return await read_url(url)
+    if name == "weather":
+        city = str(args.get("city") or "")
+        res, src = await weather(city, int(args.get("days") or 3))
+        ctx.events.append({"type": "search", "query": "pogoda " + city, "sources": src})
+        return res
     if name == "remember":
         fact = str(args.get("fact") or "").strip()
         if fact:
@@ -418,7 +614,9 @@ def system_prompt(persona: str = "standard") -> str:
     now = datetime.now()
     mem = load_memory()
     s = (f"{SYSTEM_PROMPT}\nDziś jest {DNI[now.weekday()]}, {now:%d.%m.%Y}, godzina {now:%H:%M}. "
-         "Gdy pytanie dotyczy rzeczy aktualnych, użyj web_search. Odpowiadaj własnymi słowami, nie czytaj adresów stron. "
+         "Gdy pytanie dotyczy rzeczy aktualnych albo nie masz pewności, użyj web_search (pogoda: narzędzie weather). "
+         "Z wyników podawaj konkrety: liczby, daty, nazwy. Gdy źródła się różnią, powiedz to. "
+         "Odpowiadaj własnymi słowami, nie czytaj adresów stron. "
          "Do minutników, budzików, otwierania aplikacji i muzyki używaj phone_action. "
          "Gdy użytkownik chce programu na Arduino lub ESP, użyj arduino_sketch, a w odpowiedzi nie czytaj kodu na głos.")
     if mem:
@@ -678,6 +876,9 @@ async def claude_turn(hist: list[dict], ctx: "Ctx", split: "Splitter", speak_on:
                         yield await sentence_event(s, speak_on)
                 elif kind == "block" and val.get("type") == "server_tool_use":
                     yield {"type": "search", "query": str(val.get("input", {}).get("query", ""))}
+                elif kind == "block" and val.get("type") == "web_search_tool_result" and isinstance(val.get("content"), list):
+                    yield {"type": "sources", "items": [{"title": (r.get("title") or "")[:90], "url": r.get("url", "")}
+                                                        for r in val["content"][:5] if r.get("url")]}
                 elif kind == "end":
                     content, stop = val
         except ClaudeError as e:
@@ -707,9 +908,9 @@ async def local_turn(hist: list[dict], text: str, ctx: "Ctx", split: "Splitter",
                      client: httpx.AsyncClient, persona: str = "standard"):
     messages = [{"role": "system", "content": system_prompt(persona)}] + hist[-MAX_TURNS * 2:]
     if DDGS is not None and FORCE_SEARCH.search(text):
-        yield {"type": "status", "text": "przeszukuję sieć…"}
-        yield {"type": "search", "query": text}
-        res = await run_in_threadpool(web_search, text)
+        yield {"type": "status", "text": "przeszukuję sieć i czytam strony…"}
+        res, src = await deep_search(text)
+        yield {"type": "search", "query": text, "sources": src}
         messages[-1] = {"role": "user", "content": f"{text}\n\n[Wyniki wyszukiwania w internecie]\n{res}"}
 
     model = await pick_model(client)
@@ -1034,7 +1235,7 @@ async def health():
     return {"llm": LLM_URL, "whisper": WHISPER_MODEL, "piper": piper_voice is not None,
             "search": DDGS is not None, "model": _model_cache.get("id", LLM_MODEL),
             "arduino": bool(ARDUINO_CLI), "ha": bool(HA_URL and HA_TOKEN), "laptop_audio": sd is not None,
-            "memory": len(load_memory()), "stream": True, "version": "1.4",
+            "memory": len(load_memory()), "stream": True, "version": "1.5",
             "speaking": _playing["on"] or not _play_q.empty(), "claude": bool(claude_key())}
 
 

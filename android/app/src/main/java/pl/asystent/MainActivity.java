@@ -49,7 +49,7 @@ public class MainActivity extends Activity {
     private static final int REQ_MIC = 1;
     private static final String START_URL = "https://appassets.androidplatform.net/assets/index.html";
     private static final String ACTION_USB_PERMISSION = "pl.asystent.USB_PERMISSION";
-    static final String VERSION = "1.4";
+    static final String VERSION = "1.5";
 
     private WebView web;
     private PermissionRequest pendingPermission;
@@ -240,6 +240,17 @@ public class MainActivity extends Activity {
         public void setHeadsetButton(boolean on) {
             headsetEnabled = on;
             runOnUiThread(() -> session.setActive(on));
+        }
+
+        @JavascriptInterface
+        public void openUrl(String url) {
+            if (url == null || !(url.startsWith("https://") || url.startsWith("http://"))) return;
+            runOnUiThread(() -> {
+                try {
+                    startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                } catch (Exception ignored) {
+                }
+            });
         }
 
         @JavascriptInterface

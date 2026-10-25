@@ -164,6 +164,11 @@
   @keyframes upfade { 0%, 75% { opacity: 1; } 100% { opacity: 0; } }
   .pw { position: relative; } .pw input { padding-right: 70px; }
 
+  /* źródła wyszukiwania */
+  .srcs { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 5px; }
+  .srcs a { color: var(--green2); font-size: 11px; text-decoration: none; border-bottom: 1px dotted var(--dim); }
+  .srcs a:active { color: #eafff0; }
+
   /* tryb bez filtra: częstszy glitch, czaszka przy odpowiedziach */
   body.wild .glitch::before { animation-duration: 2.2s; }
   body.wild .glitch::after { animation-duration: 2.2s; }
@@ -468,7 +473,8 @@ function handleEvent(ev, t) {
   switch (ev.type) {
     case "status": if (!t.el) setStatus(ev.text, true); break;
     case "heard": if (ev.text) add("me", ev.text); break;
-    case "search": add("net", "⌁ sieć: " + ev.query); break;
+    case "search": t.lastNet = add("net", "⌁ sieć: " + ev.query); addSources(t.lastNet, ev.sources); break;
+    case "sources": addSources(t.lastNet || (t.lastNet = add("net", "⌁ sieć")), ev.items); break;
     case "memory": add("net", "◆ " + ev.text); break;
     case "phone": runPhone(ev); break;
     case "arduino": arduinoCard(ev); break;
@@ -547,6 +553,27 @@ function fail(e) {
 async function postJson(path, body) {
   const r = await fetch(apiUrl(path), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   return r.json();
+}
+
+// ===== źródła (klikalne linki) =====
+function domainOf(u) { try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return u; } }
+function openLink(url) {
+  if (!/^https?:\/\//.test(url)) return;
+  if (NATIVE && NATIVE.openUrl) NATIVE.openUrl(url); else window.open(url, "_blank", "noopener");
+}
+function addSources(el, items) {
+  if (!el || !items || !items.length) return;
+  let box = el.querySelector(".srcs");
+  if (!box) { box = document.createElement("div"); box.className = "srcs"; el.appendChild(box); }
+  items.forEach((it) => {
+    if (box.children.length >= 8) return;
+    const a = document.createElement("a");
+    a.href = it.url; a.textContent = "[" + (box.children.length + 1) + "] " + domainOf(it.url);
+    a.title = it.title || it.url;
+    a.addEventListener("click", (e) => { e.preventDefault(); openLink(it.url); });
+    box.appendChild(a);
+  });
+  log.scrollTop = log.scrollHeight;
 }
 
 // ===== akcje w telefonie =====
@@ -1009,7 +1036,7 @@ applyNative();
   };
   let usb = false;
   try { usb = NATIVE && JSON.parse(NATIVE.info()).usbHost; } catch {}
-  await line("ASYSTENT OS v1.4 // build " + new Date().getFullYear());
+  await line("ASYSTENT OS v1.5 // build " + new Date().getFullYear());
   await wait(150);
   await line("> inicjalizacja rdzenia......", ["ok", "[OK]"]);
   await line("> moduł nasłuchu..............", ["ok", window.isSecureContext ? "[OK]" : "[BRAK HTTPS]"]);
@@ -1033,7 +1060,7 @@ applyNative();
 
 function afterBoot(h) {
   booted = true;
-  if (!history.length) add("sys", "asystent v1.4 // system gotowy");
+  if (!history.length) add("sys", "asystent v1.5 // system gotowy");
   if (IN_APP && !server) add("sys", "brak serwera — ustaw adres w ⚙");
   else if (!h) add("sys", "serwer offline — sprawdzę ponownie co 15 s");
   if (wantListen) { wantListen = false; startRec(); }

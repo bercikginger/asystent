@@ -1,4 +1,4 @@
-# Asystent głosowy – serwer na laptopie (v1.4)
+# Asystent głosowy – serwer na laptopie (v1.5)
 
 Telefon nagrywa głos → laptop rozpoznaje mowę (Whisper) → lokalny model odpowiada i używa narzędzi → laptop generuje głos (Piper) → telefon mówi **zdanie po zdaniu**.
 
@@ -66,6 +66,12 @@ set HA_TOKEN=twój_token_z_profilu_HA
 ```
 Potem mówisz np. „zapal światło w salonie”.
 
+## Wyszukiwanie w sieci
+Asystent szuka w DuckDuckGo (bez klucza), otwiera kilka najlepszych stron naraz i wyciąga z nich właściwą treść,
+dla świeżych tematów szuka też w wiadomościach. Pogoda idzie prosto z Open-Meteo. Wyniki są chwilę pamiętane, więc
+powtórne pytania są natychmiastowe. Źródła pojawiają się w czacie jako klikalne linki.
+Ustaw swoje miasto dla pogody: `set HOME_CITY=Warszawa` albo powiedz „zapamiętaj, że mieszkam w Krakowie”.
+
 ## Osobowość
 ⚙ → **OSOBOWOŚĆ**: **STANDARD** albo **☠ BEZ FILTRA** (luz, przekleństwa, czarny humor, roasty, bez moralizowania).
 
@@ -86,6 +92,7 @@ Potem mówisz np. „zapal światło w salonie”.
 | `HA_URL`, `HA_TOKEN` | puste | Home Assistant |
 | `ANTHROPIC_API_KEY` | pusty | klucz Claude (zamiast wklejania w apce) |
 | `ANTHROPIC_WORKSPACE_ID` | pusty | tylko dla klucza bez przypisanego workspace |
+| `HOME_CITY` | pusty | domyślne miasto dla pogody |
 | `SYSTEM_PROMPT` | krótki asystent PL | charakter asystenta |
 
 Pamięć asystenta, programy Arduino i klucz Claude są w folderze `data/` – nie udostępniaj go.
