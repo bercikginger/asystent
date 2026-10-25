@@ -401,7 +401,20 @@ def parse_args(raw) -> dict:
         return {}
 
 
-def system_prompt() -> str:
+PERSONAS = {
+    "standard": "",
+    "wild": (
+        "Tryb BEZ FILTRA: jesteś bezczelnym, wyszczekanym kumplem, a nie grzecznym asystentem. Mówisz luzem, "
+        "jak ziomek z osiedla, przeklinasz, kiedy pasuje (bez przesady w każdym zdaniu), masz czarny humor, sarkazm "
+        "i cięte riposty. Nie moralizujesz, nie dodajesz zbędnych ostrzeżeń ani formułek, nie owijasz w bawełnę. "
+        "Na kontrowersyjne pytania odpowiadasz wprost i masz własne zdanie. Na prośbę robisz bezlitosny roast. "
+        "Dalej jesteś pomocny i konkretny. Nie pomagasz realnie krzywdzić ludzi ani łamać prawa w poważny sposób – "
+        "wtedy odmawiasz krótko, w swoim stylu, bez kazania."
+    ),
+}
+
+
+def system_prompt(persona: str = "standard") -> str:
     now = datetime.now()
     mem = load_memory()
     s = (f"{SYSTEM_PROMPT}\nDziś jest {DNI[now.weekday()]}, {now:%d.%m.%Y}, godzina {now:%H:%M}. "
@@ -410,6 +423,8 @@ def system_prompt() -> str:
          "Gdy użytkownik chce programu na Arduino lub ESP, użyj arduino_sketch, a w odpowiedzi nie czytaj kodu na głos.")
     if mem:
         s += "\nCo wiesz o użytkowniku: " + "; ".join(mem[-40:])
+    if PERSONAS.get(persona):
+        s += "\n" + PERSONAS[persona]
     return s
 
 
@@ -643,11 +658,12 @@ async def claude_stream(client: httpx.AsyncClient, body: dict):
         yield ("end", (content, stop))
 
 
-async def claude_turn(hist: list[dict], ctx: "Ctx", split: "Splitter", speak_on: str, client: httpx.AsyncClient):
+async def claude_turn(hist: list[dict], ctx: "Ctx", split: "Splitter", speak_on: str, client: httpx.AsyncClient,
+                      persona: str = "standard"):
     msgs = [{"role": m["role"], "content": m["content"]} for m in hist[-MAX_TURNS * 2:] if m.get("content")]
     while msgs and msgs[0]["role"] != "user":
         msgs.pop(0)
-    system = system_prompt().replace("Jesteś osobistym asystentem głosowym.",
+    system = system_prompt(persona).replace("Jesteś osobistym asystentem głosowym.",
                                      "Jesteś Claude, modelem firmy Anthropic, działającym jako osobisty asystent głosowy.")
     local = await tools_for(client)
     for _ in range(MAX_ROUNDS + 3):
@@ -688,8 +704,8 @@ async def claude_turn(hist: list[dict], ctx: "Ctx", split: "Splitter", speak_on:
 
 
 async def local_turn(hist: list[dict], text: str, ctx: "Ctx", split: "Splitter", speak_on: str,
-                     client: httpx.AsyncClient):
-    messages = [{"role": "system", "content": system_prompt()}] + hist[-MAX_TURNS * 2:]
+                     client: httpx.AsyncClient, persona: str = "standard"):
+    messages = [{"role": "system", "content": system_prompt(persona)}] + hist[-MAX_TURNS * 2:]
     if DDGS is not None and FORCE_SEARCH.search(text):
         yield {"type": "status", "text": "przeszukuję sieć…"}
         yield {"type": "search", "query": text}
@@ -720,7 +736,9 @@ async def local_turn(hist: list[dict], text: str, ctx: "Ctx", split: "Splitter",
             ctx.events.clear()
 
 
-async def run_turn(session: str, text: str, board: str = "", speak_on: str = "phone", brain: str = "local"):
+async def run_turn(session: str, text: str, board: str = "", speak_on: str = "phone", brain: str = "local",
+                   persona: str = "standard"):
+    persona = persona if persona in PERSONAS else "standard"
     hist = sessions.setdefault(session, [])
     hist.append({"role": "user", "content": text})
     ctx, split = Ctx(board), Splitter()
@@ -730,7 +748,7 @@ async def run_turn(session: str, text: str, board: str = "", speak_on: str = "ph
         if brain == "claude" and claude_key():
             spoke = False
             try:
-                async for ev in claude_turn(hist, ctx, split, speak_on, client):
+                async for ev in claude_turn(hist, ctx, split, speak_on, client, persona):
                     spoke = spoke or ev["type"] == "sentence"
                     yield ev
                 used = "claude"
@@ -746,7 +764,7 @@ async def run_turn(session: str, text: str, board: str = "", speak_on: str = "ph
             yield {"type": "brain", "brain": "local", "note": "brak klucza Claude — odpowiada model lokalny (⚙)"}
 
         if used == "local":
-            async for ev in local_turn(hist, text, ctx, split, speak_on, client):
+            async for ev in local_turn(hist, text, ctx, split, speak_on, client, persona):
                 yield ev
 
     if ctx.arduino_last and not ctx.arduino_ok:
@@ -786,7 +804,8 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 @app.post("/api/stream")
 async def stream(text: str = Form(""), session: str = Form("default"), board: str = Form(""),
-                 speak_on: str = Form("phone"), brain: str = Form("local"), audio: UploadFile | None = File(None)):
+                 speak_on: str = Form("phone"), brain: str = Form("local"), persona: str = Form("standard"),
+                 audio: UploadFile | None = File(None)):
     path = await save_upload(audio) if audio is not None else None
 
     async def gen():
@@ -800,7 +819,7 @@ async def stream(text: str = Form(""), session: str = Form("default"), board: st
                 yield line(await sentence_event("Nic nie usłyszałem, spróbuj jeszcze raz.", speak_on))
                 yield line({"type": "done", "reply": ""})
                 return
-            async for ev in run_turn(session, q, board, speak_on, brain):
+            async for ev in run_turn(session, q, board, speak_on, brain, persona):
                 yield line(ev)
         except Exception as e:  # noqa: BLE001
             print(f"[!] {e!r}")
@@ -1026,7 +1045,24 @@ async def index():
 
 app.mount("/", StaticFiles(directory=BASE / "static"), name="static")
 
+def open_window() -> None:
+    """Otwiera interfejs w osobnym oknie (jak aplikacja) – Edge albo Chrome w trybie --app."""
+    url = f"http://localhost:{PORT}/"
+    if os.name == "nt":
+        for exe in ("msedge", "chrome"):
+            try:
+                subprocess.Popen(f'start "" {exe} --app={url} --window-size=460,900', shell=True)
+                return
+            except Exception:  # noqa: BLE001
+                continue
+    import webbrowser
+
+    webbrowser.open(url)
+
+
 if __name__ == "__main__":
     print(f"[i] arduino-cli: {ARDUINO_CLI or 'brak'} | Home Assistant: {'tak' if HA_URL else 'nie'} | "
           f"głośnik laptopa: {'tak' if sd else 'nie'} | wyszukiwarka: {'tak' if DDGS else 'nie'}")
+    if os.getenv("OPEN_WINDOW", "1") == "1":
+        threading.Timer(2.5, open_window).start()
     uvicorn.run(app, host="0.0.0.0", port=PORT)

@@ -164,6 +164,11 @@
   @keyframes upfade { 0%, 75% { opacity: 1; } 100% { opacity: 0; } }
   .pw { position: relative; } .pw input { padding-right: 70px; }
 
+  /* tryb bez filtra: częstszy glitch, czaszka przy odpowiedziach */
+  body.wild .glitch::before { animation-duration: 2.2s; }
+  body.wild .glitch::after { animation-duration: 2.2s; }
+  .ps.on { background: var(--green); color: #000; }
+
   @media (prefers-reduced-motion: reduce) { #rain, #crt { display: none; } .glitch::before, .glitch::after { display: none; } }
 </style>
 </head>
@@ -233,6 +238,11 @@
       <button class="chip tg" data-k="haptic">WIBRACJE</button>
       <button class="chip tg" data-k="boot">EKRAN STARTU</button>
     </div>
+    <h2>// OSOBOWOŚĆ</h2>
+    <div class="toggles">
+      <button class="chip ps" data-p="standard">STANDARD</button>
+      <button class="chip ps" data-p="wild">☠ BEZ FILTRA</button>
+    </div>
     <h2>// GŁOS I SŁUCHAWKI</h2>
     <div class="toggles">
       <button class="chip op" data-k="laptopVoice" title="Odpowiedzi z głośnika laptopa">GŁOS Z LAPTOPA</button>
@@ -273,6 +283,7 @@ const opt = { laptopVoice: false, btMic: false, headset: true };
 for (const k in opt) opt[k] = store.get("opt_" + k, opt[k] ? "1" : "0") === "1";
 let board = store.get("board", "");
 let brain = store.get("brain", "local");      // "local" albo "claude"
+let persona = store.get("persona", "standard"); // "standard" albo "wild"
 let claudeReady = false, claudeModel = "";
 const BOARDS_DEFAULT = [
   { name: "ESP32 Dev Module", fqbn: "esp32:esp32:esp32" }, { name: "ESP32-S3", fqbn: "esp32:esp32:esp32s3" },
@@ -468,6 +479,7 @@ function handleEvent(ev, t) {
         stopThinking(); busy = false; setMic("");
         t.el = add("ai", "", { restore: true });
         if (t.brain === "claude") { t.el.classList.add("cl"); t.el.dataset.h = "> CLAUDE · " + hhmm(Date.now()); }
+        if (persona === "wild") t.el.dataset.h = t.el.dataset.h.replace("·", "☠ ·");
         buzz(25); blip(1320, 0.05);
         setStatus(ev.laptop ? "mówię z laptopa…" : "transmisja…  (stuknij, żeby przerwać)");
       }
@@ -489,6 +501,7 @@ async function runTurn(fd) {
   fd.append("board", board);
   fd.append("speak_on", opt.laptopVoice ? "laptop" : "phone");
   fd.append("brain", brain);
+  fd.append("persona", persona);
   const t = turn = newTurn();
   t.brain = brain;
   abortCtl = new AbortController();
@@ -799,6 +812,18 @@ $("cForget").addEventListener("click", async () => {
   if (brain === "claude" && !claudeReady) { brain = "local"; store.set("brain", brain); applyBrain(); }
 });
 applyBrain();
+
+function applyPersona() {
+  document.body.classList.toggle("wild", persona === "wild");
+  document.querySelectorAll(".ps").forEach((b) => b.classList.toggle("on", b.dataset.p === persona));
+}
+document.querySelectorAll(".ps").forEach((b) => b.addEventListener("click", () => {
+  if (persona === b.dataset.p) return;
+  persona = b.dataset.p; store.set("persona", persona); applyPersona();
+  blip(persona === "wild" ? 220 : 880, 0.12, persona === "wild" ? "sawtooth" : "square"); buzz(persona === "wild" ? [30, 30, 30] : 20);
+  add("sys", persona === "wild" ? "// osobowość: BEZ FILTRA ☠" : "// osobowość: standard");
+}));
+applyPersona();
 
 // ===== ustawienia =====
 function openSettings() {

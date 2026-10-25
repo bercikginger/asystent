@@ -13,7 +13,7 @@ Ollama zamiast LM Studio: `set LLM_URL=http://localhost:11434/v1` przed startem.
 ## 2. Serwer
 1. Zainstaluj **Python 3.12** (zaznacz „Add to PATH”).
 2. Kliknij **start.bat**. Za pierwszym razem instaluje paczki, Whisper (~500 MB) i polski głos (~60 MB).
-3. Test: `http://localhost:8000`.
+3. Interfejs otwiera się sam w osobnym oknie (ten sam co w apce). Nie chcesz okna: `set OPEN_WINDOW=0`.
 
 ## 3. Telefon (Tailscale)
 1. Tailscale na laptopie i telefonie, to samo konto.
@@ -65,6 +65,9 @@ set HA_URL=http://homeassistant.local:8123
 set HA_TOKEN=twój_token_z_profilu_HA
 ```
 Potem mówisz np. „zapal światło w salonie”.
+
+## Osobowość
+⚙ → **OSOBOWOŚĆ**: **STANDARD** albo **☠ BEZ FILTRA** (luz, przekleństwa, czarny humor, roasty, bez moralizowania).
 
 ## Apka – słuchawki i auto
 - **Przycisk na słuchawkach / kierownicy** = mów (gdy apka jest otwarta).
