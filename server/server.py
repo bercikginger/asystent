@@ -457,6 +457,87 @@ def arduino_upload(sid: str, fqbn: str, port: str) -> tuple[bool, str]:
     return ok, log2
 
 
+# --- Kod i notatki ---
+CODE_DIR = DATA / "code"
+NOTES_DIR = DATA / "notes"
+CODE_DIR.mkdir(parents=True, exist_ok=True)
+NOTES_DIR.mkdir(parents=True, exist_ok=True)
+EXT = {"python": "py", "py": "py", "javascript": "js", "js": "js", "typescript": "ts", "ts": "ts", "html": "html",
+       "css": "css", "json": "json", "bash": "sh", "sh": "sh", "powershell": "ps1", "sql": "sql", "java": "java",
+       "kotlin": "kt", "c": "c", "cpp": "cpp", "c++": "cpp", "arduino": "ino", "ino": "ino", "rust": "rs", "go": "go",
+       "yaml": "yaml", "markdown": "md", "md": "md", "batch": "bat", "bat": "bat", "csharp": "cs", "cs": "cs"}
+
+
+def safe_name(name: str, fallback: str) -> str:
+    n = re.sub(r"[^\w.\-]+", "_", (name or "").strip())[:80].strip("._")
+    return n or fallback
+
+
+def save_code(code: str, filename: str = "", language: str = "", description: str = "") -> dict:
+    lang = (language or "").lower()
+    if not filename:
+        filename = "kod." + EXT.get(lang, "txt")
+    cid = "c" + uuid.uuid4().hex[:8]
+    d = CODE_DIR / cid
+    d.mkdir(parents=True)
+    fname = safe_name(filename, "kod.txt")
+    (d / fname).write_text(code, encoding="utf-8")
+    return {"type": "code", "id": cid, "filename": fname, "language": lang or fname.rsplit(".", 1)[-1],
+            "code": code, "description": description}
+
+
+def note_slug(title: str) -> str:
+    t = title.lower().translate(str.maketrans("ąćęłńóśźż", "acelnoszz"))
+    return re.sub(r"[^a-z0-9]+", "-", t).strip("-")[:60] or "notatka"
+
+
+def note_path(title_or_slug: str) -> Path:
+    return NOTES_DIR / f"{note_slug(title_or_slug)}.md"
+
+
+def note_title(path: Path) -> str:
+    try:
+        first = path.read_text(encoding="utf-8").split("\n", 1)[0]
+        return first.lstrip("# ").strip() or path.stem
+    except Exception:  # noqa: BLE001
+        return path.stem
+
+
+def note_save(title: str, content: str, mode: str = "new") -> tuple[str, str]:
+    title = (title or "Notatka").strip()
+    p = note_path(title)
+    stamp = datetime.now().strftime("%d.%m.%Y %H:%M")
+    if mode == "append" and p.exists():
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(f"\n\n_{stamp}_\n\n{content.strip()}\n")
+        return p.stem, "dopisano"
+    if mode == "new" and p.exists():
+        p = NOTES_DIR / f"{p.stem}-{datetime.now():%H%M%S}.md"
+    p.write_text(f"# {title}\n\n_{stamp}_\n\n{content.strip()}\n", encoding="utf-8")
+    return p.stem, "zapisano"
+
+
+def note_list() -> list[dict]:
+    items = []
+    for p in sorted(NOTES_DIR.glob("*.md"), key=lambda x: x.stat().st_mtime, reverse=True):
+        items.append({"slug": p.stem, "title": note_title(p), "updated": datetime.fromtimestamp(p.stat().st_mtime).strftime("%d.%m %H:%M"),
+                      "size": p.stat().st_size})
+    return items
+
+
+def note_find(query: str) -> Path | None:
+    p = note_path(query)
+    if p.exists():
+        return p
+    q = stems(query)
+    best, score = None, 0
+    for it in note_list():
+        sc = len(q & stems(it["title"]))
+        if sc > score:
+            best, score = NOTES_DIR / f"{it['slug']}.md", sc
+    return best
+
+
 # --- Narzędzia modelu ---
 def tool(name: str, desc: str, props: dict, required: list[str]) -> dict:
     return {"type": "function", "function": {"name": name, "description": desc,
@@ -477,6 +558,19 @@ async def tools_for(client: httpx.AsyncClient) -> list[dict]:
               "command": {"type": "string", "enum": ["play_pause", "next", "previous"]}},
              ["action"]),
     ]
+    t.append(tool("save_code",
+                  "Zapisuje kod jako plik i pokazuje go użytkownikowi na karcie z kopiowaniem i pobieraniem. "
+                  "Używaj zawsze, gdy piszesz kod (oprócz Arduino/ESP – do tego arduino_sketch). Kod musi być kompletny.",
+                  {"filename": {"type": "string", "description": "np. skaner.py"}, "language": {"type": "string"},
+                   "code": {"type": "string"}, "description": {"type": "string", "description": "jedno zdanie, co robi"}},
+                  ["filename", "code"]))
+    t.append(tool("note_save",
+                  "Zapisuje notatkę, konspekt, plan, listę albo przemyślenia użytkownika (markdown: nagłówki ##, punkty -). "
+                  "mode: new (nowa), append (dopisz do istniejącej), replace (nadpisz).",
+                  {"title": {"type": "string"}, "content": {"type": "string"},
+                   "mode": {"type": "string", "enum": ["new", "append", "replace"]}}, ["title", "content"]))
+    t.append(tool("note_list", "Lista zapisanych notatek użytkownika.", {}, []))
+    t.append(tool("note_read", "Czyta notatkę po tytule (dopasowanie przybliżone).", {"title": {"type": "string"}}, ["title"]))
     if DDGS is not None:
         t.append(tool("web_search",
                       "Szuka w internecie i czyta treść najlepszych stron. Używaj do wszystkiego, co aktualne albo "
@@ -510,11 +604,13 @@ class Ctx:
         self.events: list[dict] = []  # zdarzenia do wysłania telefonowi (akcje, karty Arduino)
         self.arduino_last: dict | None = None
         self.arduino_ok = False
+        self.code_shown = False
 
 
 TOOL_STATUS = {
     "web_search": "przeszukuję sieć i czytam strony…", "read_url": "czytam stronę…", "weather": "sprawdzam pogodę…",
-    "arduino_sketch": "kompiluję program…", "remember": "zapisuję w pamięci…",
+    "arduino_sketch": "kompiluję program…", "save_code": "piszę kod…", "note_save": "zapisuję notatkę…",
+    "note_list": "przeglądam notatki…", "note_read": "czytam notatkę…", "remember": "zapisuję w pamięci…",
     "forget_memory": "czyszczę pamięć…", "phone_action": "wysyłam do telefonu…", "home_assistant": "steruję domem…",
 }
 
@@ -584,6 +680,30 @@ async def exec_tool(name: str, args: dict, ctx: Ctx, client: httpx.AsyncClient) 
             ctx.events.append(card)
             return "Kompilacja OK. Powiedz krótko, co robi program; użytkownik wgra go przyciskiem w apce."
         return "Błąd kompilacji, popraw kod:\n" + log[-1500:]
+    if name == "save_code":
+        code = str(args.get("code") or "")
+        if not code.strip():
+            return "Brak kodu."
+        card = await run_in_threadpool(save_code, code, str(args.get("filename") or ""), str(args.get("language") or ""),
+                                       str(args.get("description") or ""))
+        ctx.events.append(card)
+        ctx.code_shown = True
+        return f"Zapisano {card['filename']}. Powiedz krótko, co robi i jak uruchomić; nie czytaj kodu na głos."
+    if name == "note_save":
+        mode = str(args.get("mode") or "new")
+        slug, what = await run_in_threadpool(note_save, str(args.get("title") or ""), str(args.get("content") or ""),
+                                             mode if mode in ("new", "append", "replace") else "new")
+        ctx.events.append({"type": "note", "slug": slug, "title": str(args.get("title") or slug), "action": what})
+        return f"Notatka {what}."
+    if name == "note_list":
+        items = await run_in_threadpool(note_list)
+        return "\n".join(f"- {i['title']} ({i['updated']})" for i in items[:40]) or "Brak notatek."
+    if name == "note_read":
+        p = await run_in_threadpool(note_find, str(args.get("title") or ""))
+        if not p:
+            return "Nie ma takiej notatki."
+        ctx.events.append({"type": "note", "slug": p.stem, "title": note_title(p), "action": "otwarto"})
+        return p.read_text(encoding="utf-8")[:8000]
     return f"Nieznane narzędzie {name}."
 
 
@@ -618,6 +738,9 @@ def system_prompt(persona: str = "standard") -> str:
          "Z wyników podawaj konkrety: liczby, daty, nazwy. Gdy źródła się różnią, powiedz to. "
          "Odpowiadaj własnymi słowami, nie czytaj adresów stron. "
          "Do minutników, budzików, otwierania aplikacji i muzyki używaj phone_action. "
+         "Gdy piszesz kod, użyj save_code i w odpowiedzi tylko krótko powiedz, co robi. "
+         "Gdy użytkownik chce coś zapisać, spisać myśli, konspekt, plan albo listę, użyj note_save (markdown z nagłówkami i punktami). "
+         "Gdy prosi o radę albo decyzję: daj konkretną rekomendację, najważniejsze plusy i minusy oraz ryzyka. "
          "Gdy użytkownik chce programu na Arduino lub ESP, użyj arduino_sketch, a w odpowiedzi nie czytaj kodu na głos.")
     if mem:
         s += "\nCo wiesz o użytkowniku: " + "; ".join(mem[-40:])
@@ -631,7 +754,36 @@ _model_cache: dict[str, str] = {}
 _tools_supported = {"ok": True}
 
 
-async def pick_model(client: httpx.AsyncClient) -> str:
+ROLES = ("chat", "code", "think")
+ROLE_NAMES = {"chat": "rozmowa", "code": "kod", "think": "myślenie"}
+ROLE_PATTERNS = {
+    "code": re.compile(r"```|\b(kod\w*|program\w*|skrypt\w*|python\w*|javascript|typescript|html|css|sql|kotlin|java|"
+                       r"bash|powershell|funkcj\w*|klas[aęy]|bug\w*|debug\w*|arduino|esp\d*\w*|regex|json|api|"
+                       r"aplikacj\w*|stron[aęy] www|refaktor\w*|komplil\w*|kompil\w*)\b|c\+\+", re.I),
+    "think": re.compile(r"\b(przeanalizuj|analiz\w*|zaplanuj|plan\w*|strategi\w*|porównaj|dorad\w*|co lepsze|co wybrać|"
+                        r"konspekt\w*|przemyśl\w*|dlaczego|jak najlepiej|za i przeciw|biznes\w*|decyzj\w*|pomysł\w*|"
+                        r"opłaca|warto)\b", re.I),
+}
+
+
+def route(text: str) -> str:
+    for role in ("code", "think"):
+        if ROLE_PATTERNS[role].search(text):
+            return role
+    return "chat"
+
+
+def role_models() -> dict:
+    m = load_config().get("models", {})
+    return {r: m.get(r, "") for r in ROLES}
+
+
+async def pick_model(client: httpx.AsyncClient, role: str = "chat") -> str:
+    models = role_models()
+    if models.get(role):
+        return models[role]
+    if models.get("chat"):
+        return models["chat"]
     if LLM_MODEL:
         return LLM_MODEL
     if "id" not in _model_cache:
@@ -701,10 +853,18 @@ class Splitter:
             t = t[: t.index("<think>")]
         return t
 
+    def spoken(self) -> str:
+        """Tekst do czytania: bez bloków kodu (kod idzie na osobną kartę)."""
+        t = re.sub(r"```.*?```", lambda m: " " * len(m.group(0)), self.clean(), flags=re.S)
+        return t[: t.index("```")] if "```" in t else t
+
+    def code_blocks(self) -> list[tuple[str, str]]:
+        return [(m.group(1) or "", m.group(2)) for m in re.finditer(r"```([\w+#.-]*)[^\n]*\n(.*?)```", self.clean(), flags=re.S)]
+
     def feed(self, text: str) -> list[str]:
         self.raw += text
         out = []
-        t = self.clean()
+        t = self.spoken()
         while True:
             rest = t[self.sent:]
             m = re.search(r"[.!?…](?=\s)|\n", rest)
@@ -719,12 +879,13 @@ class Splitter:
         return [tidy(s) for s in out if tidy(s)]
 
     def flush(self) -> list[str]:
-        rest = tidy(self.clean()[self.sent:])
-        self.sent = len(self.clean())
+        t = re.sub(r"```.*?```", lambda m: " " * len(m.group(0)), self.clean(), flags=re.S).replace("```", "   ")
+        rest = tidy(t[self.sent:])
+        self.sent = len(t)
         return [rest] if rest else []
 
     def text(self) -> str:
-        return tidy(self.clean())
+        return tidy(self.spoken())
 
 
 def tidy(s: str) -> str:
@@ -905,7 +1066,7 @@ async def claude_turn(hist: list[dict], ctx: "Ctx", split: "Splitter", speak_on:
 
 
 async def local_turn(hist: list[dict], text: str, ctx: "Ctx", split: "Splitter", speak_on: str,
-                     client: httpx.AsyncClient, persona: str = "standard"):
+                     client: httpx.AsyncClient, persona: str = "standard", role: str = "chat"):
     messages = [{"role": "system", "content": system_prompt(persona)}] + hist[-MAX_TURNS * 2:]
     if DDGS is not None and FORCE_SEARCH.search(text):
         yield {"type": "status", "text": "przeszukuję sieć i czytam strony…"}
@@ -913,7 +1074,8 @@ async def local_turn(hist: list[dict], text: str, ctx: "Ctx", split: "Splitter",
         yield {"type": "search", "query": text, "sources": src}
         messages[-1] = {"role": "user", "content": f"{text}\n\n[Wyniki wyszukiwania w internecie]\n{res}"}
 
-    model = await pick_model(client)
+    model = await pick_model(client, role)
+    yield {"type": "model", "name": model, "role": role}
     tools = await tools_for(client)
     for rnd in range(MAX_ROUNDS + 1):
         use = tools if _tools_supported["ok"] and rnd < MAX_ROUNDS else None
@@ -938,8 +1100,9 @@ async def local_turn(hist: list[dict], text: str, ctx: "Ctx", split: "Splitter",
 
 
 async def run_turn(session: str, text: str, board: str = "", speak_on: str = "phone", brain: str = "local",
-                   persona: str = "standard"):
+                   persona: str = "standard", role: str = "auto"):
     persona = persona if persona in PERSONAS else "standard"
+    role = role if role in ROLES else route(text)
     hist = sessions.setdefault(session, [])
     hist.append({"role": "user", "content": text})
     ctx, split = Ctx(board), Splitter()
@@ -965,11 +1128,16 @@ async def run_turn(session: str, text: str, board: str = "", speak_on: str = "ph
             yield {"type": "brain", "brain": "local", "note": "brak klucza Claude — odpowiada model lokalny (⚙)"}
 
         if used == "local":
-            async for ev in local_turn(hist, text, ctx, split, speak_on, client, persona):
+            async for ev in local_turn(hist, text, ctx, split, speak_on, client, persona, role):
                 yield ev
 
     if ctx.arduino_last and not ctx.arduino_ok:
         yield ctx.arduino_last  # nieudana kompilacja albo brak płytki – karta z logiem
+    if not ctx.code_shown:  # kod wklejony w odpowiedź (bez save_code) -> karta kodu
+        for lang, code in split.code_blocks():
+            if lang.lower() in ("arduino", "ino") and ARDUINO_CLI:
+                continue
+            yield await run_in_threadpool(save_code, code, "", lang, "")
     for s in split.flush():
         yield await sentence_event(s, speak_on)
     reply = split.text()
@@ -1006,7 +1174,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 @app.post("/api/stream")
 async def stream(text: str = Form(""), session: str = Form("default"), board: str = Form(""),
                  speak_on: str = Form("phone"), brain: str = Form("local"), persona: str = Form("standard"),
-                 audio: UploadFile | None = File(None)):
+                 role: str = Form("auto"), audio: UploadFile | None = File(None)):
     path = await save_upload(audio) if audio is not None else None
 
     async def gen():
@@ -1020,7 +1188,7 @@ async def stream(text: str = Form(""), session: str = Form("default"), board: st
                 yield line(await sentence_event("Nic nie usłyszałem, spróbuj jeszcze raz.", speak_on))
                 yield line({"type": "done", "reply": ""})
                 return
-            async for ev in run_turn(session, q, board, speak_on, brain, persona):
+            async for ev in run_turn(session, q, board, speak_on, brain, persona, role):
                 yield line(ev)
         except Exception as e:  # noqa: BLE001
             print(f"[!] {e!r}")
@@ -1181,6 +1349,63 @@ async def ard_firmware(sid: str, fqbn: str):
             "parts": [{"offset": off, "data": base64.b64encode(d).decode()} for off, d in parts]}
 
 
+@app.get("/api/models")
+async def models_get():
+    ids, err = [], ""
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(f"{LLM_URL}/models")
+            r.raise_for_status()
+            ids = [m["id"] for m in r.json().get("data", [])]
+    except Exception as e:  # noqa: BLE001
+        err = str(e)[:120]
+    return {"models": ids, "roles": role_models(), "names": ROLE_NAMES, "error": err}
+
+
+class ModelsIn(BaseModel):
+    chat: str = ""
+    code: str = ""
+    think: str = ""
+
+
+@app.post("/api/models")
+async def models_set(body: ModelsIn):
+    cfg = load_config()
+    cfg["models"] = {r: v for r, v in (("chat", body.chat), ("code", body.code), ("think", body.think))
+                     if re.fullmatch(r"[\w./:@+-]*", v)}
+    save_config(cfg)
+    return {"ok": True, "roles": role_models()}
+
+
+@app.get("/api/code/{cid}/{fname}")
+async def code_file(cid: str, fname: str):
+    p = CODE_DIR / cid / fname
+    if not re.fullmatch(r"c[0-9a-f]{8}", cid) or not re.fullmatch(r"[\w.\-]+", fname) or not p.is_file():
+        return JSONResponse({"error": "brak pliku"}, 404)
+    return FileResponse(p, filename=fname, media_type="text/plain; charset=utf-8")
+
+
+@app.get("/api/notes")
+async def notes_get():
+    return {"items": await run_in_threadpool(note_list)}
+
+
+@app.get("/api/notes/{slug}")
+async def note_get(slug: str):
+    p = NOTES_DIR / f"{slug}.md"
+    if not re.fullmatch(r"[a-z0-9-]+", slug) or not p.is_file():
+        return JSONResponse({"error": "brak notatki"}, 404)
+    return {"slug": slug, "title": note_title(p), "content": p.read_text(encoding="utf-8")}
+
+
+@app.delete("/api/notes/{slug}")
+async def note_delete(slug: str):
+    p = NOTES_DIR / f"{slug}.md"
+    if re.fullmatch(r"[a-z0-9-]+", slug) and p.is_file():
+        p.unlink()
+    return {"ok": True}
+
+
 class ClaudeIn(BaseModel):
     key: str = ""
     model: str = ""
@@ -1235,7 +1460,7 @@ async def health():
     return {"llm": LLM_URL, "whisper": WHISPER_MODEL, "piper": piper_voice is not None,
             "search": DDGS is not None, "model": _model_cache.get("id", LLM_MODEL),
             "arduino": bool(ARDUINO_CLI), "ha": bool(HA_URL and HA_TOKEN), "laptop_audio": sd is not None,
-            "memory": len(load_memory()), "stream": True, "version": "1.5",
+            "memory": len(load_memory()), "stream": True, "version": "1.6",
             "speaking": _playing["on"] or not _play_q.empty(), "claude": bool(claude_key())}
 
 
