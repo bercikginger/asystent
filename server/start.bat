@@ -5,19 +5,34 @@ echo ==================================================
 echo   ASYSTENT - start serwera
 echo ==================================================
 
-where python >nul 2>nul
-if errorlevel 1 (
+rem Paczki do mowy (faster-whisper / av) maja gotowe pliki dla Pythona 3.12 - na nowszym kompilacja sie wywala.
+set PY=
+py -3.12 --version >nul 2>nul && set PY=py -3.12
+if not defined PY (
+  where python >nul 2>nul && set PY=python
+)
+if not defined PY (
   echo [!] Nie widze Pythona. Zainstaluj Python 3.12 z python.org
   echo     i ZAZNACZ "Add python.exe to PATH". Potem uruchom ten plik ponownie.
   pause
   exit /b
 )
-python --version
+for /f "tokens=2" %%v in ('%PY% --version') do set PYV=%%v
+echo Python: %PYV%
+echo %PYV% | findstr /b "3.12." >nul
+if errorlevel 1 (
+  echo.
+  echo [!] Potrzebny jest Python 3.12, a masz %PYV%.
+  echo     Pobierz z python.org: Downloads - Windows - Python 3.12.x - Windows installer 64-bit,
+  echo     zainstaluj obok obecnego, potem usun folder .venv w tym folderze i uruchom ten plik ponownie.
+  pause
+  exit /b
+)
 
 if not exist .venv\Scripts\python.exe (
   echo.
   echo [1/3] Tworze srodowisko Pythona...
-  python -m venv .venv
+  %PY% -m venv .venv
   if errorlevel 1 (
     echo [!] Nie udalo sie utworzyc srodowiska.
     pause
