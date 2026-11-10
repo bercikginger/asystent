@@ -29,7 +29,7 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from faster_whisper import WhisperModel
 from pydantic import BaseModel
@@ -83,36 +83,59 @@ BOARDS = [
 print(f"[i] Ładuję Whisper '{WHISPER_MODEL}' na CPU...")
 whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
 
-# --- Głos: Piper ---
-VOICE_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/main/pl/pl_PL/gosia/medium/pl_PL-gosia-medium.onnx"
+# --- Głos: Piper (polskie głosy do wyboru) ---
+VOICE_BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/main/pl/pl_PL"
+VOICES = {
+    "gosia": "Gosia (kobieta)",
+    "darkman": "Darkman (mężczyzna, niski)",
+    "mc_speech": "MC Speech (mężczyzna)",
+}
+VOICE_SAMPLE = "Cześć, tu twój asystent. Tak brzmi mój głos, pasuje ci?"
+_voice_cache: dict = {}
+_voice_lock = threading.Lock()
 
 
-def ensure_voice() -> None:
-    """Pobiera polski głos Piper przy pierwszym uruchomieniu (~60 MB)."""
-    onnx = Path(PIPER_VOICE)
-    if onnx.exists() or onnx.name != "pl_PL-gosia-medium.onnx":
-        return
-    print("[i] Pobieram polski głos Piper (gosia, ~60 MB)...")
-    for url, dest in ((VOICE_URL, onnx), (VOICE_URL + ".json", Path(str(onnx) + ".json"))):
+def voice_file(vid: str) -> Path:
+    return BASE / f"pl_PL-{vid}-medium.onnx"
+
+
+def ensure_voice(vid: str) -> Path:
+    """Pobiera głos przy pierwszym użyciu (~60 MB)."""
+    onnx = voice_file(vid)
+    if onnx.exists() and Path(str(onnx) + ".json").exists():
+        return onnx
+    print(f"[i] Pobieram głos Piper '{vid}' (~60 MB)...")
+    url = f"{VOICE_BASE}/{vid}/medium/pl_PL-{vid}-medium.onnx"
+    for u, dest in ((url, onnx), (url + ".json", Path(str(onnx) + ".json"))):
         tmp = Path(str(dest) + ".part")
-        with httpx.stream("GET", url, follow_redirects=True, timeout=300) as r:
+        with httpx.stream("GET", u, follow_redirects=True, timeout=300) as r:
             r.raise_for_status()
             with open(tmp, "wb") as f:
                 for chunk in r.iter_bytes():
                     f.write(chunk)
         tmp.replace(dest)
+    return onnx
+
+
+def load_voice(vid: str):
+    with _voice_lock:
+        if vid not in _voice_cache:
+            from piper import PiperVoice
+
+            path = Path(os.getenv("PIPER_VOICE")) if os.getenv("PIPER_VOICE") and vid == "custom" else ensure_voice(vid)
+            _voice_cache[vid] = PiperVoice.load(str(path))
+        return _voice_cache[vid]
 
 
 piper_voice = None
 try:
-    from piper import PiperVoice
-
-    ensure_voice()
-    if Path(PIPER_VOICE).exists():
-        piper_voice = PiperVoice.load(PIPER_VOICE)
-        print(f"[i] Piper załadowany: {PIPER_VOICE}")
-    else:
-        print(f"[!] Brak pliku głosu {PIPER_VOICE} – telefon użyje własnego TTS.")
+    _cfg_voice = json.loads((DATA / "config.json").read_text(encoding="utf-8")).get("voice", "gosia")
+except Exception:  # noqa: BLE001
+    _cfg_voice = "gosia"
+CURRENT_VOICE = {"id": _cfg_voice if _cfg_voice in VOICES else "gosia"}
+try:
+    piper_voice = load_voice("custom" if os.getenv("PIPER_VOICE") else CURRENT_VOICE["id"])
+    print(f"[i] Głos Piper: {CURRENT_VOICE['id']}")
 except Exception as e:  # noqa: BLE001
     print(f"[!] Piper niedostępny ({e}) – telefon użyje własnego TTS.")
 
@@ -158,7 +181,9 @@ except ImportError:
 
 FORCE_SEARCH = re.compile(
     r"\b(wyszukaj|poszukaj|wygoogluj|sprawd[źz] w (internecie|sieci)|znajd[źz] w (internecie|sieci)|"
-    r"co nowego|najnowsze|wiadomo[śs]ci|pogod\w*|kurs\w*)\b",
+    r"co nowego|najnowsz\w*|wiadomo[śs]\w*|pogod\w*|kurs\w*|internet\w*|w sieci|sprawd[źz]\w*|szukaj|"
+    r"ile kosztuje|cen[aęy]\b|dzi[śs]|dzisiaj|wczoraj|jutro|aktualn\w*|news\w*|wynik\w*|mecz\w*|"
+    r"kto (jest|wygra\w*|zosta\w*)|kiedy (jest|będzie|wychodzi)|premier\w*|202[4-9])\b|^\s*\?",
     re.I,
 )
 DNI = ["poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sobota", "niedziela"]
@@ -614,6 +639,8 @@ def system_prompt(persona: str = "standard") -> str:
     now = datetime.now()
     mem = load_memory()
     s = (f"{SYSTEM_PROMPT}\nDziś jest {DNI[now.weekday()]}, {now:%d.%m.%Y}, godzina {now:%H:%M}. "
+         "MASZ DOSTĘP DO INTERNETU przez narzędzie web_search – nigdy nie mów, że go nie masz. "
+         "Gdy w wiadomości są [Wyniki wyszukiwania w internecie], odpowiadaj na ich podstawie. "
          "Gdy pytanie dotyczy rzeczy aktualnych albo nie masz pewności, użyj web_search (pogoda: narzędzie weather). "
          "Z wyników podawaj konkrety: liczby, daty, nazwy. Gdy źródła się różnią, powiedz to. "
          "Odpowiadaj własnymi słowami, nie czytaj adresów stron. "
@@ -733,15 +760,16 @@ def tidy(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def synthesize(text: str) -> bytes | None:
-    if not piper_voice or not text:
+def synthesize(text: str, voice=None) -> bytes | None:
+    v = voice or piper_voice
+    if not v or not text:
         return None
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
-        if hasattr(piper_voice, "synthesize_wav"):  # piper-tts >= 1.3
-            piper_voice.synthesize_wav(text, wf)
+        if hasattr(v, "synthesize_wav"):  # piper-tts >= 1.3
+            v.synthesize_wav(text, wf)
         else:  # starsze wersje
-            piper_voice.synthesize(text, wf)
+            v.synthesize(text, wf)
     return buf.getvalue()
 
 
@@ -1254,6 +1282,44 @@ async def claude_forget():
     cfg.pop("anthropic_key", None)
     save_config(cfg)
     return {"ok": True}
+
+
+@app.get("/api/voices")
+async def voices_get():
+    return {"current": CURRENT_VOICE["id"], "voices": [
+        {"id": k, "name": v, "downloaded": voice_file(k).exists()} for k, v in VOICES.items()]}
+
+
+@app.get("/api/voices/{vid}/sample")
+async def voice_sample(vid: str):
+    if vid not in VOICES:
+        return JSONResponse({"error": "nie ma takiego głosu"}, 404)
+    try:
+        v = await run_in_threadpool(load_voice, vid)
+        wav = await run_in_threadpool(synthesize, VOICE_SAMPLE, v)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": f"nie udało się pobrać głosu: {e}"[:200]}, 500)
+    return Response(content=wav, media_type="audio/wav")
+
+
+class VoiceIn(BaseModel):
+    id: str
+
+
+@app.post("/api/voices")
+async def voice_set(body: VoiceIn):
+    global piper_voice
+    if body.id not in VOICES:
+        return JSONResponse({"ok": False, "error": "nie ma takiego głosu"}, 404)
+    try:
+        piper_voice = await run_in_threadpool(load_voice, body.id)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)[:200]}, 500)
+    CURRENT_VOICE["id"] = body.id
+    cfg = load_config()
+    cfg["voice"] = body.id
+    save_config(cfg)
+    return {"ok": True, "current": body.id}
 
 
 @app.get("/api/health")
