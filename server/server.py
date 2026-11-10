@@ -977,8 +977,30 @@ async def run_turn(session: str, text: str, board: str = "", speak_on: str = "ph
     yield {"type": "done", "reply": reply, "brain": used}
 
 
+def decode_audio(path: str):
+    """Własne dekodowanie do 16 kHz mono – działa z każdą wersją PyAV (nowe usunęły metadata_errors)."""
+    import av
+    import numpy as np
+
+    out = []
+    with av.open(path) as f:
+        stream = next(s for s in f.streams if s.type == "audio")
+        res = av.AudioResampler(format="s16", layout="mono", rate=16000)
+        for frame in f.decode(stream):
+            for fr in res.resample(frame) or []:
+                out.append(fr.to_ndarray().reshape(-1))
+        for fr in res.resample(None) or []:
+            out.append(fr.to_ndarray().reshape(-1))
+    if not out:
+        return np.zeros(0, dtype=np.float32)
+    return np.concatenate(out).astype(np.float32) / 32768.0
+
+
 def transcribe(path: str) -> str:
-    segments, _ = whisper.transcribe(path, language="pl", beam_size=1, vad_filter=True)
+    audio = decode_audio(path)
+    if audio.size < 1600:  # krócej niż 0,1 s
+        return ""
+    segments, _ = whisper.transcribe(audio, language="pl", beam_size=1, vad_filter=True)
     return " ".join(s.text.strip() for s in segments).strip()
 
 
@@ -1028,8 +1050,6 @@ async def stream(text: str = Form(""), session: str = Form("default"), board: st
             if "connection attempts failed" in msg.lower() or "connecterror" in repr(e).lower():
                 msg = ("Nie widzę LM Studio. Otwórz LM Studio → zakładka Developer → załaduj model → "
                        "włącz Start Server (port 1234).")
-            elif "metadata_errors" in msg:
-                msg = "Za nowa paczka av – zamknij okno serwera i uruchom start.bat jeszcze raz (sam to naprawi)."
             yield line({"type": "error", "message": msg})
 
     return StreamingResponse(gen(), media_type="application/x-ndjson",

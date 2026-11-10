@@ -3,7 +3,6 @@ uvicorn
 python-multipart
 httpx
 faster-whisper
-av>=11,<15
 piper-tts
 ddgs
 numpy
