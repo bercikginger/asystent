@@ -29,6 +29,15 @@ if errorlevel 1 (
   exit /b
 )
 
+rem stare srodowisko z innym Pythonem -> usun i zrob od nowa
+if exist .venv\Scripts\python.exe (
+  .venv\Scripts\python --version 2>nul | findstr /c:"Python 3.12." >nul
+  if errorlevel 1 (
+    echo [i] Usuwam stare srodowisko z inna wersja Pythona...
+    rmdir /s /q .venv
+  )
+)
+
 if not exist .venv\Scripts\python.exe (
   echo.
   echo [1/3] Tworze srodowisko Pythona...
@@ -44,7 +53,7 @@ if not exist .venv\Scripts\python.exe (
 echo.
 echo [2/3] Instaluje / sprawdzam paczki. Za pierwszym razem to trwa 5-10 minut,
 echo       widac postep ponizej - nie zamykaj okna.
-.venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\python -m pip install --prefer-binary --only-binary=av,numpy,onnxruntime -r requirements.txt
 if errorlevel 1 (
   echo [!] Instalacja paczek nie przeszla - zrob zdjecie bledu powyzej.
   pause
