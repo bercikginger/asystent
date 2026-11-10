@@ -1024,7 +1024,13 @@ async def stream(text: str = Form(""), session: str = Form("default"), board: st
                 yield line(ev)
         except Exception as e:  # noqa: BLE001
             print(f"[!] {e!r}")
-            yield line({"type": "error", "message": str(e)[:300]})
+            msg = str(e)[:300]
+            if "connection attempts failed" in msg.lower() or "connecterror" in repr(e).lower():
+                msg = ("Nie widzę LM Studio. Otwórz LM Studio → zakładka Developer → załaduj model → "
+                       "włącz Start Server (port 1234).")
+            elif "metadata_errors" in msg:
+                msg = "Za nowa paczka av – zamknij okno serwera i uruchom start.bat jeszcze raz (sam to naprawi)."
+            yield line({"type": "error", "message": msg})
 
     return StreamingResponse(gen(), media_type="application/x-ndjson",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
